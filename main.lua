@@ -1,7 +1,10 @@
---// Dungeon Quest Combat Pilot V7.12
+--// Dungeon Quest Combat Pilot V7.13
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Dense mob-cluster aim + full respawn combat reset
 --// Dynamic spell data + buff-first paired casting
+--// Low-overhead combat loop + cached boss detection
+--// Close-chaser priority + route-guided distant targets
+--// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
 --// Soft profile routes: combat/dodging free-roam, then forward route rejoin
@@ -89,7 +92,17 @@ local CFG = {
     PREDICT_NEAR = 0.24,
     PREDICT_FAR = 0.55,
     EXPAND_PREDICT = 0.72,
-    HAZARD_UPDATE_INTERVAL = 0.025,
+    AI_UPDATE_INTERVAL = 1 / 30,
+    TARGET_UPDATE_INTERVAL = 0.075,
+    HAZARD_UPDATE_INTERVAL = 1 / 30,
+    ENEMY_FALLBACK_INTERVAL = 1.00,
+    SPELL_DECISION_INTERVAL = 0.05,
+    CLOSE_DANGER_DISTANCE = 15,
+    CHASER_PRIORITY_DISTANCE = 28,
+    CHASER_APPROACH_SPEED = 2.0,
+    CHASER_FACING_DOT = 0.55,
+    DANGER_CLUSTER_RADIUS = 20,
+    ROUTE_TARGET_DISTANCE = 40,
     PLAYER_MOTION_PREDICTION = 0.65,
     MAX_ACCEL_PREDICT_OFFSET = 8,
     MAX_SIZE_ACCELERATION = 48,
@@ -134,7 +147,10 @@ local CFG = {
     STUCK_INTERVAL = 0.55,
     MIN_PROGRESS = 0.80,
     STUCK_RESET_LIMIT = 5,
-    STATIONARY_DISTANCE = 0.15
+    STATIONARY_DISTANCE = 0.15,
+    WALL_NOCLIP_RAY_DISTANCE = 6,
+    WALL_NOCLIP_HOLD = 0.75,
+    WALL_NOCLIP_RESTORE_MARGIN = 3
 }
 
 --------------------------------------------------
@@ -171,6 +187,10 @@ local function stopOld(name)
             old.Interface:Destroy()
         end)
     end
+
+    if old.RestoreWalls then
+        pcall(old.RestoreWalls, old)
+    end
 end
 
 local oldStates = {
@@ -196,7 +216,8 @@ local oldStates = {
     "DQ_COMBAT_V79",
     "DQ_COMBAT_V710",
     "DQ_COMBAT_V711",
-    "DQ_COMBAT_V712"
+    "DQ_COMBAT_V712",
+    "DQ_COMBAT_V713"
 }
 
 for _, name in ipairs(oldStates) do
@@ -222,7 +243,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V79_RENDER",
     "DQ_COMBAT_V710_RENDER",
     "DQ_COMBAT_V711_RENDER",
-    "DQ_COMBAT_V712_RENDER"
+    "DQ_COMBAT_V712_RENDER",
+    "DQ_COMBAT_V713_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -234,17 +256,27 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V712_RENDER",
+    RenderName = "DQ_COMBAT_V713_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
+    WallNoclip = true,
     TargetIsBoss = false,
-    BossCheckTarget = nil,
-    BossCheckResult = false,
-    BossCheckTime = 0
+    TargetPriority = "NONE",
+    CloseThreatCount = 0,
+    RouteGuidedTarget = false,
+    OpenWallCount = 0,
+    OpenWallParts = setmetatable({}, {__mode = "k"}),
+    BossIdentityCache = setmetatable({}, {__mode = "k"}),
+    VisibleBossNames = {},
+    LastVisibleBossScan = -math.huge,
+    ProfileBossNames = {},
+    AbilityButtonCache = {},
+    LastAITick = -math.huge,
+    LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V712 = State
+ENV.DQ_COMBAT_V713 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -267,6 +299,7 @@ pcall(function()
         "DQCombatV76",
         "DQCombatV711",
         "DQCombatV712",
+        "DQCombatV713",
         "XyneriaUI",
         "WindUI"
     }
@@ -674,6 +707,25 @@ local EnemyFolders = {}
 
 local lastEnemyFallback = 0
 
+do
+    local profileBosses =
+        DungeonData.Profile
+        and DungeonData.Profile.BossNames
+
+    if type(profileBosses) == "table" then
+        for key, value in pairs(profileBosses) do
+            local bossName =
+                type(key) == "number"
+                and value
+                or key
+
+            State.ProfileBossNames[
+                string.lower(tostring(bossName))
+            ] = true
+        end
+    end
+end
+
 local function validEnemy(model)
     if not model
         or not model:IsA("Model")
@@ -699,46 +751,73 @@ local function validEnemy(model)
         and root ~= nil
 end
 
+function State:RefreshVisibleBossNames(now)
+    if now - self.LastVisibleBossScan < 0.75 then
+        return
+    end
+
+    self.LastVisibleBossScan = now
+    self.VisibleBossNames = {}
+
+    local playerGui =
+        LP:FindFirstChildOfClass("PlayerGui")
+
+    if not playerGui then
+        return
+    end
+
+    -- One shared GUI pass replaces the old per-enemy pass.
+    -- Wide visible text is normally the Dungeon Quest boss bar.
+    for _, object in ipairs(
+        playerGui:GetDescendants()
+    ) do
+        if object:IsA("TextLabel")
+            and object.Visible
+            and object.AbsoluteSize.X >= 140 then
+
+            local textValue =
+                string.lower(
+                    tostring(object.Text or "")
+                )
+
+            if #textValue > 2 then
+                self.VisibleBossNames[textValue] = true
+            end
+        end
+    end
+end
+
 function State:IsBossEnemy(enemy)
     if not validEnemy(enemy) then
         return false
     end
 
     local now = os.clock()
+    local cached = self.BossIdentityCache[enemy]
 
-    if self.BossCheckTarget == enemy
-        and now - self.BossCheckTime < 0.50 then
+    if cached
+        and now - cached.Time
+            < (
+                cached.Result
+                and 10
+                or 1.25
+            ) then
 
-        return self.BossCheckResult
+        return cached.Result
     end
 
-    self.BossCheckTarget = enemy
-    self.BossCheckResult = false
-    self.BossCheckTime = now
-
-    local profileBosses =
-        DungeonData.Profile
-        and DungeonData.Profile.BossNames
-
-    if type(profileBosses) == "table" then
-        for key, value in pairs(profileBosses) do
-            local bossName =
-                type(key) == "number"
-                and value
-                or key
-
-            if string.lower(tostring(bossName))
-                == string.lower(enemy.Name) then
-
-                self.BossCheckResult = true
-                return true
-            end
-        end
-    end
+    local enemyName =
+        string.lower(enemy.Name or "")
+    local result =
+        self.ProfileBossNames[enemyName] == true
 
     local current = enemy
 
     for _ = 1, 7 do
+        if result then
+            break
+        end
+
         if not current then
             break
         end
@@ -750,8 +829,8 @@ function State:IsBossEnemy(enemy)
             or current:GetAttribute("IsBoss") == true
             or current:GetAttribute("Boss") == true then
 
-            self.BossCheckResult = true
-            return true
+            result = true
+            break
         end
 
         local marker =
@@ -762,47 +841,33 @@ function State:IsBossEnemy(enemy)
             and marker:IsA("BoolValue")
             and marker.Value then
 
-            self.BossCheckResult = true
-            return true
+            result = true
+            break
         end
 
         current = current.Parent
     end
 
-    local isTagged = false
-
-    pcall(function()
-        isTagged =
-            game:GetService("CollectionService"):
-            HasTag(enemy, "Boss")
-    end)
-
-    if isTagged then
-        self.BossCheckResult = true
-        return true
+    if not result then
+        pcall(function()
+            result =
+                game:GetService("CollectionService"):
+                HasTag(enemy, "Boss")
+        end)
     end
 
-    local playerGui =
-        LP:FindFirstChildOfClass("PlayerGui")
-
-    if playerGui then
-        for _, object in ipairs(
-            playerGui:GetDescendants()
-        ) do
-            if object:IsA("TextLabel")
-                and object.Visible
-                and string.lower(
-                    tostring(object.Text or "")
-                ) == string.lower(enemy.Name)
-                and object.AbsoluteSize.X >= 140 then
-
-                self.BossCheckResult = true
-                return true
-            end
-        end
+    if not result then
+        self:RefreshVisibleBossNames(now)
+        result =
+            self.VisibleBossNames[enemyName] == true
     end
 
-    return false
+    self.BossIdentityCache[enemy] = {
+        Result = result,
+        Time = now
+    }
+
+    return result
 end
 
 local function registerEnemy(model)
@@ -913,7 +978,8 @@ local function fallbackEnemyScan()
 
     local now = os.clock()
 
-    if now - lastEnemyFallback < 0.08 then
+    if now - lastEnemyFallback
+        < CFG.ENEMY_FALLBACK_INTERVAL then
         return
     end
 
@@ -1019,16 +1085,234 @@ local function exactTargetResult(
         1
 end
 
+function State:CloseChaserTarget(position)
+    local threats = {}
+
+    for enemy in pairs(Enemies) do
+        if not validEnemy(enemy) then
+            Enemies[enemy] = nil
+
+        else
+            local enemyRoot =
+                enemy:FindFirstChild(
+                    "HumanoidRootPart"
+                )
+
+            local humanoid =
+                enemy:FindFirstChildOfClass(
+                    "Humanoid"
+                )
+
+            if enemyRoot and humanoid then
+                local offset =
+                    flat(
+                        position
+                        - enemyRoot.Position
+                    )
+
+                local distance = offset.Magnitude
+
+                if distance > 0.05
+                    and distance
+                        <= CFG.CHASER_PRIORITY_DISTANCE
+                    and math.abs(
+                        enemyRoot.Position.Y
+                        - position.Y
+                    ) <= 18 then
+
+                    local towardPlayer = offset.Unit
+                    local velocity =
+                        flat(
+                            enemyRoot.AssemblyLinearVelocity
+                            or Vector3.zero
+                        )
+
+                    local approachSpeed =
+                        velocity:Dot(towardPlayer)
+
+                    local facingVector =
+                        flat(
+                            enemyRoot.CFrame.LookVector
+                        )
+
+                    local facingDot =
+                        facingVector.Magnitude > 0.05
+                        and facingVector.Unit:Dot(
+                            towardPlayer
+                        )
+                        or -1
+
+                    local moveDirection =
+                        flat(
+                            humanoid.MoveDirection
+                            or Vector3.zero
+                        )
+
+                    local moveDot =
+                        moveDirection.Magnitude > 0.05
+                        and moveDirection.Unit:Dot(
+                            towardPlayer
+                        )
+                        or -1
+
+                    local pursuing =
+                        approachSpeed
+                            >= CFG.CHASER_APPROACH_SPEED
+                        or moveDot >= 0.40
+                        or (
+                            distance <= 20
+                            and facingDot
+                                >= CFG.CHASER_FACING_DOT
+                        )
+
+                    if distance
+                        <= CFG.CLOSE_DANGER_DISTANCE
+                        or pursuing then
+
+                        local score =
+                            distance
+                            - math.max(
+                                approachSpeed,
+                                0
+                            ) * 0.8
+                            - math.max(
+                                facingDot,
+                                0
+                            ) * 2
+                            - (
+                                distance
+                                    <= CFG.CLOSE_DANGER_DISTANCE
+                                and 25
+                                or 0
+                            )
+
+                        table.insert(
+                            threats,
+                            {
+                                Enemy = enemy,
+                                Position = enemyRoot.Position,
+                                Distance = distance,
+                                Score = score
+                            }
+                        )
+                    end
+                end
+            end
+        end
+    end
+
+    State.CloseThreatCount = #threats
+
+    if #threats == 0 then
+        return nil
+    end
+
+    table.sort(
+        threats,
+        function(a, b)
+            return a.Score < b.Score
+        end
+    )
+
+    local primary = threats[1]
+    local total = Vector3.zero
+    local memberCount = 0
+
+    for _, threat in ipairs(threats) do
+        if (
+            flat(
+                threat.Position
+                - primary.Position
+            )
+        ).Magnitude <= CFG.DANGER_CLUSTER_RADIUS then
+
+            total = total + threat.Position
+            memberCount = memberCount + 1
+        end
+    end
+
+    local centre =
+        memberCount > 0
+        and total / memberCount
+        or primary.Position
+
+    return primary.Enemy,
+        (
+            flat(centre)
+            - flat(position)
+        ).Magnitude,
+        centre,
+        math.max(memberCount, 1)
+end
+
 local function chooseTarget(
     position,
     currentTarget
 )
+    local dangerTarget,
+        dangerDistance,
+        dangerAim,
+        dangerCount =
+            State:CloseChaserTarget(position)
+
+    if dangerTarget then
+        State.TargetPriority = "DANGER"
+
+        return dangerTarget,
+            dangerDistance,
+            dangerAim,
+            dangerCount
+    end
+
     local closest,
         closestDistance =
             nearestEnemy(position)
 
     if not closest then
+        State.TargetPriority = "NONE"
         return nil, math.huge, nil, 0
+    end
+
+    -- A visible boss health bar means the encounter is active.
+    -- Keep that boss acquired even when it is across the arena
+    -- or a spawned add happens to be physically closer.
+    State:RefreshVisibleBossNames(os.clock())
+
+    local visibleBoss = nil
+    local visibleBossDistance = math.huge
+
+    for enemy in pairs(Enemies) do
+        if validEnemy(enemy)
+            and State.VisibleBossNames[
+                string.lower(enemy.Name or "")
+            ]
+            and State:IsBossEnemy(enemy) then
+
+            local bossPosition =
+                enemyWorldPosition(enemy)
+
+            local distance =
+                bossPosition
+                and (
+                    flat(bossPosition)
+                    - flat(position)
+                ).Magnitude
+                or math.huge
+
+            if distance < visibleBossDistance then
+                visibleBoss = enemy
+                visibleBossDistance = distance
+            end
+        end
+    end
+
+    if visibleBoss then
+        State.TargetPriority = "BOSS"
+
+        return exactTargetResult(
+            position,
+            visibleBoss
+        )
     end
 
     -- A boss that has already been acquired remains the
@@ -1037,6 +1321,8 @@ local function chooseTarget(
     if validEnemy(currentTarget)
         and State:IsBossEnemy(currentTarget) then
 
+        State.TargetPriority = "BOSS"
+
         return exactTargetResult(
             position,
             currentTarget
@@ -1044,6 +1330,8 @@ local function chooseTarget(
     end
 
     if State:IsBossEnemy(closest) then
+        State.TargetPriority = "BOSS"
+
         return exactTargetResult(
             position,
             closest
@@ -1098,6 +1386,8 @@ local function chooseTarget(
     end
 
     if #candidates == 0 then
+        State.TargetPriority = "MOB"
+
         return closest,
             closestDistance,
             enemyWorldPosition(closest),
@@ -1193,6 +1483,8 @@ local function chooseTarget(
             end
         end
     end
+
+    State.TargetPriority = "PACK"
 
     return selected or closest,
         bestDistance,
@@ -1455,6 +1747,37 @@ State.ProfileRouteFlow = (function()
                 and routeEntry.WaitForMobs == true
                 or false
         }
+    end
+
+    function flow:TargetApproachPoint(
+        position,
+        targetPosition,
+        targetRoomOrder
+    )
+        if not targetPosition then
+            return nil
+        end
+
+        local point = self:ProgressPoint(position)
+
+        if not point then
+            return nil
+        end
+
+        local pointOrder =
+            tonumber(point.RoomOrder)
+        local targetOrder =
+            tonumber(targetRoomOrder)
+
+        -- Never follow the route beyond the target's room.
+        if pointOrder
+            and targetOrder
+            and pointOrder > targetOrder then
+
+            return nil
+        end
+
+        return point
     end
 
     State.RouteIndex = 0
@@ -1917,7 +2240,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V712_Hazard"
+        "DQ_V713_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3140,6 +3463,126 @@ end
 -- WALL SLIDE
 --------------------------------------------------
 
+function State:RestoreWalls()
+    for part, record in pairs(self.OpenWallParts) do
+        if part and part.Parent then
+            pcall(function()
+                part.CanCollide =
+                    record.CanCollide
+            end)
+        end
+
+        self.OpenWallParts[part] = nil
+    end
+
+    self.OpenWallCount = 0
+end
+
+function State:RootOverlapsWall(root, part)
+    if not root
+        or not part
+        or not part.Parent then
+
+        return false
+    end
+
+    local localPosition =
+        part.CFrame:PointToObjectSpace(
+            root.Position
+        )
+    local margin =
+        CFG.WALL_NOCLIP_RESTORE_MARGIN
+
+    return math.abs(localPosition.X)
+            <= part.Size.X / 2 + margin
+        and math.abs(localPosition.Y)
+            <= part.Size.Y / 2 + margin
+        and math.abs(localPosition.Z)
+            <= part.Size.Z / 2 + margin
+end
+
+function State:MaintainWallNoclip(root)
+    local now = os.clock()
+    local count = 0
+
+    for part, record in pairs(self.OpenWallParts) do
+        if not part or not part.Parent then
+            self.OpenWallParts[part] = nil
+
+        elseif now >= record.Expires then
+            if self:RootOverlapsWall(root, part) then
+                record.Expires =
+                    now + CFG.WALL_NOCLIP_HOLD
+                count = count + 1
+            else
+                pcall(function()
+                    part.CanCollide =
+                        record.CanCollide
+                end)
+
+                self.OpenWallParts[part] = nil
+            end
+        else
+            count = count + 1
+        end
+    end
+
+    self.OpenWallCount = count
+end
+
+function State:OpenWallForNoclip(
+    hit,
+    character
+)
+    if not self.WallNoclip
+        or not hit
+        or not hit.Instance
+        or not hit.Instance:IsA("BasePart")
+        or math.abs(hit.Normal.Y) > 0.35 then
+
+        return false
+    end
+
+    local part = hit.Instance
+    local minimumHorizontal =
+        math.min(part.Size.X, part.Size.Z)
+    local wallShaped =
+        part.Size.Y >= 3
+        and part.Size.Y
+            >= minimumHorizontal * 1.25
+
+    if not part.CanCollide
+        or not part.Anchored
+        or not wallShaped
+        or part:IsDescendantOf(character)
+        or part:FindFirstAncestor("enemyFolder")
+        or Hazards[part]
+        or isPlayerObject(part) then
+
+        return false
+    end
+
+    local record = self.OpenWallParts[part]
+
+    if not record then
+        record = {
+            CanCollide = part.CanCollide,
+            Expires = 0
+        }
+
+        self.OpenWallParts[part] = record
+    end
+
+    record.Expires =
+        os.clock() + CFG.WALL_NOCLIP_HOLD
+
+    pcall(function()
+        part.CanCollide = false
+    end)
+
+    return true
+end
+
 local function wallSteer(
     desired,
     root,
@@ -3165,7 +3608,8 @@ local function wallSteer(
                 0
             ),
 
-            desired * 6,
+            desired
+                * CFG.WALL_NOCLIP_RAY_DISTANCE,
 
             params
         )
@@ -3174,6 +3618,15 @@ local function wallSteer(
         or not hit.Instance
         or not hit.Instance.CanCollide then
 
+        return desired
+    end
+
+    -- The ray is horizontal and the hit normal must also be
+    -- horizontal, so floors, ramps and platforms stay solid.
+    if State:OpenWallForNoclip(
+        hit,
+        character
+    ) then
         return desired
     end
 
@@ -4644,7 +5097,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V712_FacingAttachment"
+        "DQ_V713_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -4655,7 +5108,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V712_Facing"
+        "DQ_V713_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -5122,7 +5575,8 @@ local SpellFlow = (function()
         PairToken = 0,
         PairOrder = nil,
         QAttempts = 0,
-        EAttempts = 0
+        EAttempts = 0,
+        LastUseCheck = -math.huge
     }
 
     local function packKey(target)
@@ -5159,6 +5613,22 @@ local SpellFlow = (function()
             return false
         end
 
+        local cached =
+            State.AbilityButtonCache[letter]
+
+        if cached and cached.Parent then
+            local success =
+                pcall(function()
+                    cached:Activate()
+                end)
+
+            if success then
+                return true
+            end
+
+            State.AbilityButtonCache[letter] = nil
+        end
+
         for _, object in ipairs(
             playerGui:GetDescendants()
         ) do
@@ -5187,6 +5657,8 @@ local SpellFlow = (function()
                                 end)
 
                             if success then
+                                State.AbilityButtonCache[letter] =
+                                    current
                                 return true
                             end
                         end
@@ -5490,6 +5962,8 @@ local SpellFlow = (function()
         self.PairOrder = nil
         self.QAttempts = 0
         self.EAttempts = 0
+        self.LastUseCheck = -math.huge
+        State.AbilityButtonCache = {}
 
         refreshAbilityRuntime(true)
     end
@@ -5649,12 +6123,21 @@ local SpellFlow = (function()
         mode,
         remoteCast
     )
+        local now = os.clock()
+
+        if now - self.LastUseCheck
+            < CFG.SPELL_DECISION_INTERVAL then
+
+            return
+        end
+
+        self.LastUseCheck = now
+
         local qRange,
             eRange,
             qBuff,
             eBuff =
                 pairedAbilityRanges()
-        local now = os.clock()
         local qAbilityReady =
             currentAbilityReady("Q")
         local eAbilityReady =
@@ -6116,6 +6599,11 @@ local function updateRemoteCastMode(
 )
     local castRange =
         maximumOffensiveRange()
+    local reliableCastLimit =
+        math.max(
+            castRange - 2,
+            DESIRED_DISTANCE + 2
+        )
 
     if target ~= RemoteCastTarget then
         RemoteCastTarget = target
@@ -6126,8 +6614,9 @@ local function updateRemoteCastMode(
     end
 
     if not validEnemy(target)
-        or distance <= castRange - 4
-        or distance > castRange + 4 then
+        or not State:IsBossEnemy(target)
+        or distance > reliableCastLimit
+        or distance <= DESIRED_DISTANCE + 2 then
 
         RemoteCastMode = false
 
@@ -6198,9 +6687,9 @@ local function resetCombatCycle(nextMode)
     State.OwnAbilityIgnoreUntil = 0
     State.SpacingActive = false
     State.TargetIsBoss = false
-    State.BossCheckTarget = nil
-    State.BossCheckResult = false
-    State.BossCheckTime = 0
+    State.TargetPriority = "NONE"
+    State.CloseThreatCount = 0
+    State.RouteGuidedTarget = false
 
     RemoteCastMode = false
     RemoteCastTarget = nil
@@ -6217,6 +6706,8 @@ local function resetCombatCycle(nextMode)
     DodgeSide = "NONE"
     LastThreatSeen = 0
     BlockedSince = nil
+    State.LastAITick = -math.huge
+    State.LastTargetUpdate = -math.huge
 
     LastPosition = nil
     LastPositionTime = os.clock()
@@ -6227,6 +6718,7 @@ local function resetCombatCycle(nextMode)
     StationaryTime = os.clock()
 
     clearPath()
+    State:RestoreWalls()
 
     pcall(function()
         if FacingAlign then
@@ -6286,7 +6778,15 @@ connect(
             return
         end
 
-        updateHazards()
+        local now = os.clock()
+
+        if now - State.LastAITick
+            < CFG.AI_UPDATE_INTERVAL then
+
+            return
+        end
+
+        State.LastAITick = now
 
         local character,
             root,
@@ -6296,6 +6796,8 @@ connect(
         if not root then
             return
         end
+
+        updateHazards()
 
         if not ENABLED then
             Mode = "OFF"
@@ -6310,18 +6812,28 @@ connect(
         -- TARGET IMMEDIATELY
         --------------------------------------------------
 
-        if next(Hazards) ~= nil then
-            fallbackEnemyScan()
-        end
+        if not validEnemy(Target)
+            or now - State.LastTargetUpdate
+                >= CFG.TARGET_UPDATE_INTERVAL then
 
-        Target,
-            TargetDistance,
-            TargetAimPosition,
-            TargetClusterCount =
-                chooseTarget(
-                    root.Position,
-                    Target
-                )
+            Target,
+                TargetDistance,
+                TargetAimPosition,
+                TargetClusterCount =
+                    chooseTarget(
+                        root.Position,
+                        Target
+                    )
+
+            State.LastTargetUpdate = now
+
+        elseif TargetAimPosition then
+            TargetDistance =
+                (
+                    flat(TargetAimPosition)
+                    - flat(root.Position)
+                ).Magnitude
+        end
 
         State.TargetIsBoss =
             State:IsBossEnemy(Target)
@@ -6332,7 +6844,10 @@ connect(
                     Target
                 )
 
-            if order then
+            if order
+                and TargetDistance
+                    <= CFG.ROUTE_TARGET_DISTANCE then
+
                 LastRoomOrder =
                     math.max(
                         LastRoomOrder,
@@ -6379,8 +6894,6 @@ connect(
 
         ThreatFuture =
             futureDistance
-
-        local now = os.clock()
 
         SpellFlow:Observe(
             Target,
@@ -6795,6 +7308,7 @@ connect(
 
         if not Target then
             State.SpacingActive = false
+            State.RouteGuidedTarget = false
 
             fallbackEnemyScan()
 
@@ -6940,9 +7454,52 @@ connect(
             return
         end
 
-        local navigationPosition =
+        local combatNavigationPosition =
             TargetAimPosition
             or enemyRoot.Position
+
+        local navigationPosition =
+            combatNavigationPosition
+
+        State.RouteGuidedTarget = false
+
+        -- Distant enemies and bosses are approached along the
+        -- recorded dungeon spine. Combat and every dodge branch
+        -- above still have unrestricted local movement.
+        if State.TargetPriority ~= "DANGER"
+            and TargetDistance
+                > CFG.ROUTE_TARGET_DISTANCE then
+
+            local routeApproach =
+                State.ProfileRouteFlow:
+                TargetApproachPoint(
+                    root.Position,
+                    combatNavigationPosition,
+                    enemyRoomOrder(Target)
+                )
+
+            if routeApproach
+                and routeApproach.Position
+                and (
+                    flat(
+                        routeApproach.Position
+                        - root.Position
+                    )
+                ).Magnitude > 2.5 then
+
+                navigationPosition =
+                    routeApproach.Position
+                State.RouteGuidedTarget = true
+
+                if routeApproach.RoomOrder then
+                    LastRoomOrder =
+                        math.max(
+                            LastRoomOrder,
+                            routeApproach.RoomOrder
+                        )
+                end
+            end
+        end
 
         local toward =
             flat(
@@ -7077,7 +7634,10 @@ connect(
             elseif TargetDistance
                 > DESIRED_DISTANCE + 2 then
 
-                Mode = "BOSS CHASE"
+                Mode =
+                    State.RouteGuidedTarget
+                    and "BOSS ROUTE"
+                    or "BOSS CHASE"
                 DesiredSpeed = CHASE_SPEED
                 DesiredDirection =
                     wallSteer(
@@ -7124,7 +7684,10 @@ connect(
         elseif TargetDistance
             > DESIRED_DISTANCE + 4 then
 
-            Mode = "CHASE"
+            Mode =
+                State.RouteGuidedTarget
+                and "TARGET ROUTE"
+                or "CHASE"
             DesiredSpeed = CHASE_SPEED
 
             DesiredDirection =
@@ -7199,6 +7762,8 @@ RunService:BindToRenderStep(
         if not root then
             return
         end
+
+        State:MaintainWallNoclip(root)
 
         if not ENABLED then
             humanoid.AutoRotate = true
@@ -7831,7 +8396,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.12",
+                    Version = "V7.13",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -7901,6 +8466,21 @@ local function createInterface()
                     if not ENABLED then
                         DesiredDirection =
                             Vector3.zero
+                    end
+                end
+            })
+
+            combatControls:Toggle({
+                Title = "Walls-only Noclip",
+                Desc = "Pass vertical walls when needed; floors stay solid",
+                Value = State.WallNoclip,
+                Flag = "DQWallsOnlyNoclip",
+                Callback = function(value)
+                    State.WallNoclip =
+                        value ~= false
+
+                    if not State.WallNoclip then
+                        State:RestoreWalls()
                     end
                 end
             })
@@ -8134,7 +8714,7 @@ local function createInterface()
                     statusElapsed =
                         statusElapsed + dt
 
-                    if statusElapsed < 0.10 then
+                    if statusElapsed < 0.35 then
                         return
                     end
 
@@ -8207,7 +8787,7 @@ local function createInterface()
                     local pathText =
                         Waypoints
                         and (
-                            tostring(CurrentWaypoint)
+                            tostring(WaypointIndex)
                             .. "/"
                             .. tostring(#Waypoints)
                         )
@@ -8235,6 +8815,11 @@ local function createInterface()
                         .. " | Cluster:"
                         .. tostring(
                             TargetClusterCount
+                        )
+                        .. " | Priority:"
+                        .. tostring(
+                            State.TargetPriority
+                                or "NONE"
                         )
                         .. "\nThreat: "
                         .. ThreatLevel
@@ -8264,10 +8849,29 @@ local function createInterface()
                         .. tostring(State.RouteIndex or 0)
                         .. "/"
                         .. tostring(State.RouteCount or 0)
+                        .. " | Guide:"
+                        .. (
+                            State.RouteGuidedTarget
+                            and "ON"
+                            or "OFF"
+                        )
                         .. " | Stuck:"
                         .. tostring(StuckCount)
                         .. " | Still:"
                         .. tostring(StationaryCount)
+                        .. "\nClose threats: "
+                        .. tostring(
+                            State.CloseThreatCount or 0
+                        )
+                        .. " | Wall noclip:"
+                        .. (
+                            State.WallNoclip
+                            and "ON/"
+                            or "OFF/"
+                        )
+                        .. tostring(
+                            State.OpenWallCount or 0
+                        )
                         .. "\nSpells: "
                         .. SpellFlow:Status()
                         .. "\nProfile: "
@@ -8296,7 +8900,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.12",
+                "Combat Pilot V7.13",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -8314,5 +8918,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.12 loaded"
+    "Dungeon Quest Combat Pilot V7.13 loaded"
 )

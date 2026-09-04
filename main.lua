@@ -1,9 +1,10 @@
---// Dungeon Quest Combat Pilot V7.6
+--// Dungeon Quest Combat Pilot V7.7
 --// Left/right committed dodge + expanding hazard prediction
 --// Dense mob-cluster aim + full respawn combat reset
 --// Continuous close-range Q/E spam enabled by default
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
+--// Soft profile routes: combat/dodging free-roam, then forward route rejoin
 --//
 --// Q = Inner Focus
 --// E = Geyser
@@ -70,92 +71,56 @@ local DUNGEON_PROFILE_BASE_URL =
     or "https://raw.githubusercontent.com/itsmashood/dqr-info/main"
 
 --------------------------------------------------
--- PREDICTION
+-- PREDICTION / HAZARDS / DODGE / PATHING
 --------------------------------------------------
 
-local BODY_RADIUS = 2.2
-
-local PREDICT_NEAR = 0.24
-local PREDICT_FAR = 0.55
-local EXPAND_PREDICT = 0.72
-
-local HAZARD_UPDATE_INTERVAL = 0.025
-local PLAYER_MOTION_PREDICTION = 0.65
-local MAX_ACCEL_PREDICT_OFFSET = 8
-local MAX_SIZE_ACCELERATION = 48
-local THREAT_PREDICTION_SAMPLES = 7
-local EMERGENCY_IMPACT_TIME = 0.28
-local FAST_HAZARD_SPEED = 28
-local FAST_WARNING_EXTRA = 3.5
-
-local EXPAND_RATE_MIN = 1.25
-local EXPAND_WARNING_EXTRA = 9.5
-local EXPAND_EMERGENCY_EXTRA = 3.0
-local EXPAND_OUTWARD_WEIGHT = 0.32
-
-local WARNING_EXTRA = 7.0
-local EMERGENCY_EXTRA = 2.2
-
-local EXIT_EXTRA = 0.8
-local ROUTE_EXTRA = 1.2
-local DESTINATION_EXTRA = 2.0
-
---------------------------------------------------
--- HAZARD LIFETIME
---------------------------------------------------
-
-local PRECAST_LIFE = 1.05
-local HITBOX_LIFE = 0.50
-local ATTACK_LIFE = 0.85
-local GENERIC_LIFE = 0.65
-
-local PROJECTILE_LIFE = 1.20
-local LASER_PART_LIFE = 5.0
-
-local LASER_PART_MAX_LIFE = 12
-
-local VISUAL_LIFE = 0.35
-
---------------------------------------------------
--- DODGE
---------------------------------------------------
-
-local DODGE_LOCK = 0.36
-local DODGE_REPLAN = 0.05
-local EVADE_REPLAN = 0.07
-local DODGE_SIDE_RELEASE = 0.65
-local QUICK_DODGE_DISTANCE = 10
-
-local DODGE_RADII = {
-    8,
-    13,
-    19,
-    27,
-    34
+local CFG = {
+    BODY_RADIUS = 2.2,
+    PREDICT_NEAR = 0.24,
+    PREDICT_FAR = 0.55,
+    EXPAND_PREDICT = 0.72,
+    HAZARD_UPDATE_INTERVAL = 0.025,
+    PLAYER_MOTION_PREDICTION = 0.65,
+    MAX_ACCEL_PREDICT_OFFSET = 8,
+    MAX_SIZE_ACCELERATION = 48,
+    THREAT_PREDICTION_SAMPLES = 7,
+    EMERGENCY_IMPACT_TIME = 0.28,
+    FAST_HAZARD_SPEED = 28,
+    FAST_WARNING_EXTRA = 3.5,
+    EXPAND_RATE_MIN = 1.25,
+    EXPAND_WARNING_EXTRA = 9.5,
+    EXPAND_EMERGENCY_EXTRA = 3.0,
+    EXPAND_OUTWARD_WEIGHT = 0.32,
+    WARNING_EXTRA = 7.0,
+    EMERGENCY_EXTRA = 2.2,
+    EXIT_EXTRA = 0.8,
+    ROUTE_EXTRA = 1.2,
+    DESTINATION_EXTRA = 2.0,
+    PRECAST_LIFE = 1.05,
+    HITBOX_LIFE = 0.50,
+    ATTACK_LIFE = 0.85,
+    GENERIC_LIFE = 0.65,
+    PROJECTILE_LIFE = 1.20,
+    LASER_PART_LIFE = 5.0,
+    LASER_PART_MAX_LIFE = 12,
+    VISUAL_LIFE = 0.35,
+    DODGE_LOCK = 0.36,
+    DODGE_REPLAN = 0.05,
+    EVADE_REPLAN = 0.07,
+    DODGE_SIDE_RELEASE = 0.65,
+    QUICK_DODGE_DISTANCE = 10,
+    DODGE_RADII = {8, 13, 19, 27, 34},
+    EVADE_RADII = {7, 11, 16},
+    ROUTE_SAMPLES = 7,
+    TOP_CANDIDATES = 24,
+    PATH_RECALC = 0.60,
+    BLOCKED_DELAY = 0.16,
+    WAYPOINT_DISTANCE = 4,
+    STUCK_INTERVAL = 0.55,
+    MIN_PROGRESS = 0.80,
+    STUCK_RESET_LIMIT = 5,
+    STATIONARY_DISTANCE = 0.15
 }
-
-local EVADE_RADII = {
-    7,
-    11,
-    16
-}
-
-local ROUTE_SAMPLES = 7
-local TOP_CANDIDATES = 24
-
---------------------------------------------------
--- PATHING
---------------------------------------------------
-
-local PATH_RECALC = 0.60
-local BLOCKED_DELAY = 0.16
-
-local WAYPOINT_DISTANCE = 4
-
-local STUCK_INTERVAL = 0.55
-local MIN_PROGRESS = 0.80
-local STUCK_RESET_LIMIT = 5
-local STATIONARY_DISTANCE = 0.15
 
 --------------------------------------------------
 -- CLEAN OLD VERSIONS
@@ -210,7 +175,8 @@ local oldStates = {
     "DQ_COMBAT_V73",
     "DQ_COMBAT_V74",
     "DQ_COMBAT_V75",
-    "DQ_COMBAT_V76"
+    "DQ_COMBAT_V76",
+    "DQ_COMBAT_V77"
 }
 
 for _, name in ipairs(oldStates) do
@@ -231,7 +197,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V73_RENDER",
     "DQ_COMBAT_V74_RENDER",
     "DQ_COMBAT_V75_RENDER",
-    "DQ_COMBAT_V76_RENDER"
+    "DQ_COMBAT_V76_RENDER",
+    "DQ_COMBAT_V77_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -243,7 +210,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V76_RENDER",
+    RenderName = "DQ_COMBAT_V77_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -253,7 +220,7 @@ local State = {
     BossCheckTime = 0
 }
 
-ENV.DQ_COMBAT_V76 = State
+ENV.DQ_COMBAT_V77 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -274,6 +241,7 @@ pcall(function()
         "DQCombatV74",
         "DQCombatV75",
         "DQCombatV76",
+        "DQCombatV77",
         "XyneriaUI",
         "WindUI"
     }
@@ -443,6 +411,12 @@ local DungeonData = (function()
         Loaded = false
     }
 
+    local cacheBuster =
+        tostring(
+            ENV.DQ_DUNGEON_PROFILE_CACHE
+            or os.time()
+        )
+
     local function joinUrl(...)
         local pieces = {...}
 
@@ -461,6 +435,16 @@ local DungeonData = (function()
         end
 
         return table.concat(pieces, "/")
+    end
+
+    local function freshUrl(url)
+        return tostring(url)
+            .. (
+                tostring(url):find("?", 1, true)
+                and "&cache="
+                or "?cache="
+            )
+            .. cacheBuster
     end
 
     local function compileTable(source, label)
@@ -535,9 +519,11 @@ local DungeonData = (function()
         local manifest =
             compileTable(
                 game:HttpGet(
-                    joinUrl(
-                        DUNGEON_PROFILE_BASE_URL,
-                        "manifest.lua"
+                    freshUrl(
+                        joinUrl(
+                            DUNGEON_PROFILE_BASE_URL,
+                            "manifest.lua"
+                        )
                     )
                 ),
                 "Dungeon manifest"
@@ -597,9 +583,11 @@ local DungeonData = (function()
         local profile =
             compileTable(
                 game:HttpGet(
-                    joinUrl(
-                        DUNGEON_PROFILE_BASE_URL,
-                        fileName
+                    freshUrl(
+                        joinUrl(
+                            DUNGEON_PROFILE_BASE_URL,
+                            fileName
+                        )
                     )
                 ),
                 tostring(profileName)
@@ -636,6 +624,7 @@ local DungeonData = (function()
         BOB_LEASH_DISTANCE =
             tonumber(movement.BobLeashDistance)
             or BOB_LEASH_DISTANCE
+
     end)
 
     return result
@@ -1148,6 +1137,263 @@ end
 
 local LastRoomOrder = 0
 
+State.ProfileRouteFlow = (function()
+    local flow = {
+        Route =
+            DungeonData.Profile
+            and DungeonData.Profile.Route
+            or {},
+        Cursor = nil,
+        Complete = false
+    }
+
+    if type(flow.Route) ~= "table" then
+        flow.Route = {}
+    end
+
+    local movement =
+        DungeonData.Profile
+        and DungeonData.Profile.Movement
+        or {}
+
+    local reachedDistance =
+        tonumber(movement.RouteReachedDistance)
+        or 5.5
+
+    local forwardScan =
+        math.max(
+            math.floor(
+                tonumber(movement.RouteForwardScan)
+                or 30
+            ),
+            1
+        )
+
+    local rejoinLimit =
+        tonumber(movement.RouteRejoinLimit)
+        or 70
+
+    local function routePosition(point)
+        local value =
+            type(point) == "table"
+            and (
+                point.Position
+                or point.position
+                or point
+            )
+            or nil
+
+        if typeof(value) == "Vector3" then
+            return value
+        end
+
+        if type(value) ~= "table" then
+            return nil
+        end
+
+        local x =
+            tonumber(
+                value.X
+                or value.x
+                or value[1]
+            )
+
+        local y =
+            tonumber(
+                value.Y
+                or value.y
+                or value[2]
+            )
+
+        local z =
+            tonumber(
+                value.Z
+                or value.z
+                or value[3]
+            )
+
+        if not x or not y or not z then
+            return nil
+        end
+
+        return Vector3.new(x, y, z)
+    end
+
+    local function nearestIndex(
+        position,
+        firstIndex,
+        lastIndex
+    )
+        local bestIndex = nil
+        local bestDistance = math.huge
+
+        firstIndex =
+            math.max(
+                firstIndex or 1,
+                1
+            )
+
+        lastIndex =
+            math.min(
+                lastIndex or #flow.Route,
+                #flow.Route
+            )
+
+        for index = firstIndex, lastIndex do
+            local waypoint =
+                routePosition(
+                    flow.Route[index]
+                )
+
+            if waypoint then
+                local distance =
+                    (
+                        flat(waypoint)
+                        - flat(position)
+                    ).Magnitude
+
+                if distance < bestDistance then
+                    bestIndex = index
+                    bestDistance = distance
+                end
+            end
+        end
+
+        return bestIndex, bestDistance
+    end
+
+    function flow:ResetForRespawn()
+        self.Cursor = nil
+        self.Complete = false
+        State.RouteIndex = 0
+    end
+
+    function flow:ProgressPoint(position)
+        if #self.Route == 0
+            or self.Complete then
+
+            return nil
+        end
+
+        if not self.Cursor then
+            self.Cursor =
+                nearestIndex(position)
+                or 1
+        end
+
+        self.Cursor =
+            math.clamp(
+                self.Cursor,
+                1,
+                #self.Route
+            )
+
+        -- Combat may pull the character away from the line.
+        -- Rejoin only at the current point or a forward point,
+        -- never by walking a completed section backwards.
+        local forwardIndex,
+            forwardDistance =
+                nearestIndex(
+                    position,
+                    self.Cursor,
+                    self.Cursor + forwardScan
+                )
+
+        if forwardIndex
+            and forwardIndex > self.Cursor
+            and forwardDistance <= rejoinLimit then
+
+            self.Cursor = forwardIndex
+        end
+
+        while self.Cursor < #self.Route do
+            local currentPosition =
+                routePosition(
+                    self.Route[self.Cursor]
+                )
+
+            local nextPosition =
+                routePosition(
+                    self.Route[self.Cursor + 1]
+                )
+
+            if not currentPosition then
+                self.Cursor = self.Cursor + 1
+
+            elseif nextPosition then
+                local currentDistance =
+                    (
+                        flat(currentPosition)
+                        - flat(position)
+                    ).Magnitude
+
+                local nextDistance =
+                    (
+                        flat(nextPosition)
+                        - flat(position)
+                    ).Magnitude
+
+                if currentDistance <= reachedDistance
+                    or nextDistance + 1.25
+                        < currentDistance then
+
+                    self.Cursor = self.Cursor + 1
+                else
+                    break
+                end
+            else
+                break
+            end
+        end
+
+        local routeEntry =
+            self.Route[self.Cursor]
+
+        local waypoint =
+            routePosition(routeEntry)
+
+        if not waypoint then
+            self.Complete = true
+            State.RouteIndex = #self.Route
+            return nil
+        end
+
+        local distance =
+            (
+                flat(waypoint)
+                - flat(position)
+            ).Magnitude
+
+        if self.Cursor == #self.Route
+            and distance <= reachedDistance then
+
+            self.Complete = true
+            State.RouteIndex = #self.Route
+            return nil
+        end
+
+        State.RouteIndex = self.Cursor
+
+        return {
+            Position = waypoint,
+            RouteIndex = self.Cursor,
+            RoomOrder =
+                type(routeEntry) == "table"
+                and routeEntry.RoomOrder
+                or nil,
+            WaitForMobs =
+                type(routeEntry) == "table"
+                and routeEntry.WaitForMobs == true
+                or false
+        }
+    end
+
+    State.RouteIndex = 0
+    State.RouteCount = #flow.Route
+
+    return flow
+end)()
+
 local function enemyRoomOrder(enemy)
     if not enemy
         or not enemy.Parent then
@@ -1332,6 +1578,32 @@ local function nameBlob(object)
     )
 end
 
+function State:ProfileIgnoresHazard(object)
+    local profileHazards =
+        DungeonData.Profile
+        and DungeonData.Profile.Hazards
+
+    if not profileHazards then
+        return false
+    end
+
+    local blob = nameBlob(object)
+
+    for _, pattern in ipairs(
+        profileHazards.IgnorePatterns or {}
+    ) do
+        if blob:find(
+            string.lower(tostring(pattern)),
+            1,
+            true
+        ) then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function classifyPart(
     part,
     genericAllowed
@@ -1348,19 +1620,11 @@ local function classifyPart(
         DungeonData.Profile
         and DungeonData.Profile.Hazards
 
-    if profileHazards then
-        for _, pattern in ipairs(
-            profileHazards.IgnorePatterns or {}
-        ) do
-            if blob:find(
-                string.lower(tostring(pattern)),
-                1,
-                true
-            ) then
-                return nil
-            end
-        end
+    if State:ProfileIgnoresHazard(part) then
+        return nil
+    end
 
+    if profileHazards then
         for pattern, kind in pairs(
             profileHazards.KindByPattern or {}
         ) do
@@ -1544,26 +1808,26 @@ end
 
 local function hazardLife(kind)
     if kind == "PRECAST" then
-        return PRECAST_LIFE
+        return CFG.PRECAST_LIFE
     end
 
     if kind == "HITBOX" then
-        return HITBOX_LIFE
+        return CFG.HITBOX_LIFE
     end
 
     if kind == "LASER" then
-        return LASER_PART_LIFE
+        return CFG.LASER_PART_LIFE
     end
 
     if kind == "PROJECTILE" then
-        return PROJECTILE_LIFE
+        return CFG.PROJECTILE_LIFE
     end
 
     if kind == "ATTACK" then
-        return ATTACK_LIFE
+        return CFG.ATTACK_LIFE
     end
 
-    return GENERIC_LIFE
+    return CFG.GENERIC_LIFE
 end
 
 --------------------------------------------------
@@ -1584,7 +1848,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V76_Hazard"
+        "DQ_V77_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -1690,7 +1954,7 @@ local function registerHazardPart(
             ),
 
         VisualUntil =
-            now + VISUAL_LIFE
+            now + CFG.VISUAL_LIFE
     }
 
     if not watchedParts[part] then
@@ -1705,7 +1969,8 @@ end
 local function registerBeam(beam)
     if not beam
         or not beam:IsA("Beam")
-        or isOwnAbility(beam) then
+        or isOwnAbility(beam)
+        or State:ProfileIgnoresHazard(beam) then
 
         return
     end
@@ -1870,7 +2135,7 @@ local function updateHazards()
     local now = os.clock()
 
     if now - lastHazardUpdate
-        < HAZARD_UPDATE_INTERVAL then
+        < CFG.HAZARD_UPDATE_INTERVAL then
 
         return
     end
@@ -1978,7 +2243,7 @@ local function updateHazards()
 
                 hazard.Expanding =
                     hazard.ExpandRate
-                        >= EXPAND_RATE_MIN
+                        >= CFG.EXPAND_RATE_MIN
 
                 if hazard.Expanding then
                     hazard.Expires =
@@ -2018,7 +2283,7 @@ local function updateHazards()
                         math.min(
                             now + 1.25,
                             hazard.Created
-                                + LASER_PART_MAX_LIFE
+                                + CFG.LASER_PART_MAX_LIFE
                         )
                 end
 
@@ -2148,11 +2413,11 @@ local function accelerationOffset(
         flat(offset)
 
     if horizontal.Magnitude
-        > MAX_ACCEL_PREDICT_OFFSET then
+        > CFG.MAX_ACCEL_PREDICT_OFFSET then
 
         horizontal =
             horizontal.Unit
-            * MAX_ACCEL_PREDICT_OFFSET
+            * CFG.MAX_ACCEL_PREDICT_OFFSET
 
         offset =
             Vector3.new(
@@ -2216,19 +2481,19 @@ local function partDistance(
             math.clamp(
                 sizeAcceleration.X,
                 0,
-                MAX_SIZE_ACCELERATION
+                CFG.MAX_SIZE_ACCELERATION
             ),
 
             math.clamp(
                 sizeAcceleration.Y,
                 0,
-                MAX_SIZE_ACCELERATION
+                CFG.MAX_SIZE_ACCELERATION
             ),
 
             math.clamp(
                 sizeAcceleration.Z,
                 0,
-                MAX_SIZE_ACCELERATION
+                CFG.MAX_SIZE_ACCELERATION
             )
         ) * 0.5
             * future
@@ -2466,8 +2731,8 @@ local function getThreat(
     ) do
         local expansionHorizon =
             hazard.Expanding
-            and EXPAND_PREDICT
-            or PREDICT_FAR
+            and CFG.EXPAND_PREDICT
+            or CFG.PREDICT_FAR
 
         local name =
             hazard.Name or ""
@@ -2492,11 +2757,11 @@ local function getThreat(
             hazardDistance(
                 position
                     + playerVelocity
-                        * PREDICT_NEAR
-                        * PLAYER_MOTION_PREDICTION,
+                        * CFG.PREDICT_NEAR
+                        * CFG.PLAYER_MOTION_PREDICTION,
 
                 hazard,
-                PREDICT_NEAR
+                CFG.PREDICT_NEAR
             )
 
         local predicted =
@@ -2508,27 +2773,27 @@ local function getThreat(
         local impactTime = nil
 
         local impactClearance =
-            BODY_RADIUS
+            CFG.BODY_RADIUS
             + 1.0
             + (
                 bobStyleCircle
-                and EXPAND_EMERGENCY_EXTRA
+                and CFG.EXPAND_EMERGENCY_EXTRA
                 or 0
             )
 
         for sample = 1,
-            THREAT_PREDICTION_SAMPLES do
+            CFG.THREAT_PREDICTION_SAMPLES do
 
             local future =
                 expansionHorizon
                 * sample
-                / THREAT_PREDICTION_SAMPLES
+                / CFG.THREAT_PREDICTION_SAMPLES
 
             local futurePosition =
                 position
                 + playerVelocity
                     * future
-                    * PLAYER_MOTION_PREDICTION
+                    * CFG.PLAYER_MOTION_PREDICTION
 
             local distance =
                 hazardDistance(
@@ -2564,8 +2829,8 @@ local function getThreat(
             math.clamp(
                 (
                     speed
-                    - FAST_HAZARD_SPEED
-                ) / FAST_HAZARD_SPEED,
+                    - CFG.FAST_HAZARD_SPEED
+                ) / CFG.FAST_HAZARD_SPEED,
 
                 0,
                 1
@@ -2573,24 +2838,24 @@ local function getThreat(
 
         local emergency =
             current
-                <= BODY_RADIUS
-                    + EMERGENCY_EXTRA
+                <= CFG.BODY_RADIUS
+                    + CFG.EMERGENCY_EXTRA
                     + (
                         bobStyleCircle
-                        and EXPAND_EMERGENCY_EXTRA
+                        and CFG.EXPAND_EMERGENCY_EXTRA
                         or 0
                     )
             or nearFuture
-                <= BODY_RADIUS
+                <= CFG.BODY_RADIUS
                     + 0.7
                     + (
                         bobStyleCircle
-                        and EXPAND_EMERGENCY_EXTRA
+                        and CFG.EXPAND_EMERGENCY_EXTRA
                         or 0
                     )
             or impactTime
                 and impactTime
-                    <= EMERGENCY_IMPACT_TIME
+                    <= CFG.EMERGENCY_IMPACT_TIME
 
         local warning =
             false
@@ -2598,17 +2863,17 @@ local function getThreat(
         if not emergency then
             warning =
                 predicted
-                    <= BODY_RADIUS
-                        + WARNING_EXTRA
+                    <= CFG.BODY_RADIUS
+                        + CFG.WARNING_EXTRA
                         + (
                             bobStyleCircle
-                            and EXPAND_WARNING_EXTRA
+                            and CFG.EXPAND_WARNING_EXTRA
                             or hazard.Expanding
                                 and 3.5
                                 or 0
                         )
                         + fastFactor
-                            * FAST_WARNING_EXTRA
+                            * CFG.FAST_WARNING_EXTRA
         end
 
         local level = nil
@@ -2980,18 +3245,18 @@ local function routeSafe(
 
         local startedInside =
             startDistance
-            <= BODY_RADIUS
-                + EXIT_EXTRA
+            <= CFG.BODY_RADIUS
+                + CFG.EXIT_EXTRA
 
         local escaped =
             not startedInside
 
         for sample = 1,
-            ROUTE_SAMPLES do
+            CFG.ROUTE_SAMPLES do
 
             local alpha =
                 sample
-                / ROUTE_SAMPLES
+                / CFG.ROUTE_SAMPLES
 
             local point =
                 startPosition:
@@ -3004,8 +3269,8 @@ local function routeSafe(
                 math.min(
                     eta * alpha,
                     hazard.Expanding
-                        and EXPAND_PREDICT
-                        or PREDICT_FAR
+                        and CFG.EXPAND_PREDICT
+                        or CFG.PREDICT_FAR
                 )
 
             local distance =
@@ -3017,16 +3282,16 @@ local function routeSafe(
 
             if not escaped then
                 if distance
-                    > BODY_RADIUS
-                        + EXIT_EXTRA then
+                    > CFG.BODY_RADIUS
+                        + CFG.EXIT_EXTRA then
 
                     escaped = true
                 end
 
             else
                 if distance
-                    <= BODY_RADIUS
-                        + ROUTE_EXTRA then
+                    <= CFG.BODY_RADIUS
+                        + CFG.ROUTE_EXTRA then
 
                     return false, 0
                 end
@@ -3046,14 +3311,14 @@ local function routeSafe(
                 math.min(
                     eta,
                     hazard.Expanding
-                        and EXPAND_PREDICT
-                        or PREDICT_FAR
+                        and CFG.EXPAND_PREDICT
+                        or CFG.PREDICT_FAR
                 )
             )
 
         if destinationDistance
-            <= BODY_RADIUS
-                + DESTINATION_EXTRA then
+            <= CFG.BODY_RADIUS
+                + CFG.DESTINATION_EXTRA then
 
             return false, 0
         end
@@ -3191,12 +3456,12 @@ local function threatEscapeDirection(
         a =
             a
             + hazard.V0
-                * PREDICT_NEAR
+                * CFG.PREDICT_NEAR
 
         b =
             b
             + hazard.V1
-                * PREDICT_NEAR
+                * CFG.PREDICT_NEAR
 
         local point =
             Vector2.new(
@@ -3422,7 +3687,7 @@ local function candidateDirections(
                         add(
                             baseLeft
                             + outward
-                                * EXPAND_OUTWARD_WEIGHT,
+                                * CFG.EXPAND_OUTWARD_WEIGHT,
                             "LEFT",
                             true
                         )
@@ -3441,7 +3706,7 @@ local function candidateDirections(
                         add(
                             baseRight
                             + outward
-                                * EXPAND_OUTWARD_WEIGHT,
+                                * CFG.EXPAND_OUTWARD_WEIGHT,
                             "RIGHT",
                             true
                         )
@@ -3559,7 +3824,7 @@ local function committedLateralFallback(
                     direction =
                         direction
                         - toward
-                            * EXPAND_OUTWARD_WEIGHT
+                            * CFG.EXPAND_OUTWARD_WEIGHT
                 end
 
                 local leash =
@@ -3652,7 +3917,7 @@ local function quickDodgeDirection(
         local destination =
             root.Position
             + entry.Direction
-                * QUICK_DODGE_DISTANCE
+                * CFG.QUICK_DODGE_DISTANCE
 
         local safe,
             clearance =
@@ -3774,9 +4039,9 @@ local function findEscape(
     local radii
 
     if soft then
-        radii = EVADE_RADII
+        radii = CFG.EVADE_RADII
     else
-        radii = DODGE_RADII
+        radii = CFG.DODGE_RADII
     end
 
     local options = {}
@@ -3910,7 +4175,7 @@ local function findEscape(
     local checks =
         math.min(
             #options,
-            TOP_CANDIDATES
+            CFG.TOP_CANDIDATES
         )
 
     local best = nil
@@ -4013,7 +4278,7 @@ local function buildPath(
 
     if not force
         and now - LastPathBuild
-            < PATH_RECALC then
+            < CFG.PATH_RECALC then
 
         return false
     end
@@ -4080,7 +4345,7 @@ local function pathDirection(
             - root.Position
         )
     ).Magnitude
-        <= WAYPOINT_DISTANCE then
+        <= CFG.WAYPOINT_DISTANCE then
 
         WaypointIndex =
             WaypointIndex + 1
@@ -4143,7 +4408,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V76_FacingAttachment"
+        "DQ_V77_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -4154,7 +4419,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V76_Facing"
+        "DQ_V77_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -4782,7 +5047,7 @@ local function stuckCheck(root)
     end
 
     if now - LastPositionTime
-        < STUCK_INTERVAL then
+        < CFG.STUCK_INTERVAL then
 
         return false
     end
@@ -4820,13 +5085,13 @@ local function stuckCheck(root)
         and Mode ~= "RESETTING"
 
     if shouldBeMoving
-        and progress < MIN_PROGRESS then
+        and progress < CFG.MIN_PROGRESS then
 
         StuckCount =
             StuckCount + 1
 
         if StuckCount
-            > STUCK_RESET_LIMIT then
+            > CFG.STUCK_RESET_LIMIT then
 
             resetStuckCharacter(root)
             return false
@@ -4835,7 +5100,7 @@ local function stuckCheck(root)
         return true
     end
 
-    if progress >= MIN_PROGRESS then
+    if progress >= CFG.MIN_PROGRESS then
         StuckCount = 0
     end
 
@@ -4879,7 +5144,7 @@ local function stationaryResetCheck(root)
     end
 
     if now - StationaryTime
-        < STUCK_INTERVAL then
+        < CFG.STUCK_INTERVAL then
 
         return false
     end
@@ -4896,7 +5161,7 @@ local function stationaryResetCheck(root)
     StationaryPosition = root.Position
     StationaryTime = now
 
-    if moved <= STATIONARY_DISTANCE then
+    if moved <= CFG.STATIONARY_DISTANCE then
         StationaryCount =
             StationaryCount + 1
     else
@@ -4904,7 +5169,7 @@ local function stationaryResetCheck(root)
     end
 
     if StationaryCount
-        > STUCK_RESET_LIMIT then
+        > CFG.STUCK_RESET_LIMIT then
 
         resetStuckCharacter(root)
         return true
@@ -4977,6 +5242,7 @@ local BoundCharacters = {}
 
 local function resetCombatCycle(nextMode)
     SpellFlow:Reset()
+    State.ProfileRouteFlow:ResetForRespawn()
 
     Target = nil
     TargetDistance = math.huge
@@ -5211,7 +5477,7 @@ connect(
         if threat then
             LastThreatSeen = now
         elseif now - LastThreatSeen
-            >= DODGE_SIDE_RELEASE then
+            >= CFG.DODGE_SIDE_RELEASE then
 
             DodgeSide = "NONE"
         end
@@ -5261,7 +5527,7 @@ connect(
                     DodgeUntil =
                         math.max(
                             DodgeUntil,
-                            now + DODGE_LOCK
+                            now + CFG.DODGE_LOCK
                         )
                 end
 
@@ -5293,7 +5559,7 @@ connect(
 
             if needsPlan
                 and now - LastDodgePlan
-                    >= DODGE_REPLAN then
+                    >= CFG.DODGE_REPLAN then
 
                 local point,
                     side =
@@ -5328,7 +5594,7 @@ connect(
             DodgeUntil =
                 math.max(
                     DodgeUntil,
-                    now + DODGE_LOCK
+                    now + CFG.DODGE_LOCK
                 )
 
             --------------------------------------------------
@@ -5381,7 +5647,7 @@ connect(
                 DODGE_SPEED
             )
                 and now - LastDodgePlan
-                    >= DODGE_REPLAN then
+                    >= CFG.DODGE_REPLAN then
 
                 local newPoint,
                     newSide =
@@ -5480,7 +5746,7 @@ connect(
 
             if replan
                 and now - LastEvadePlan
-                    >= EVADE_REPLAN then
+                    >= CFG.EVADE_REPLAN then
 
                 local side
 
@@ -5591,19 +5857,46 @@ connect(
 
             fallbackEnemyScan()
 
-            local room =
-                findNextRoom(
-                    LastRoomOrder
-                )
-
-            local point =
-                roomProgressPoint(
-                    room,
+            -- A mapped route is only a navigation spine. It is
+            -- consulted when combat is clear; attacking and every
+            -- dodge branch above retain completely free movement.
+            local routePoint =
+                State.ProfileRouteFlow:ProgressPoint(
                     root.Position
                 )
 
+            local room = nil
+            local point = routePoint
+
+            if routePoint
+                and routePoint.RoomOrder then
+
+                LastRoomOrder =
+                    math.max(
+                        LastRoomOrder,
+                        routePoint.RoomOrder
+                    )
+            end
+
+            if not point then
+                room =
+                    findNextRoom(
+                        LastRoomOrder
+                    )
+
+                point =
+                    roomProgressPoint(
+                        room,
+                        root.Position
+                    )
+            end
+
             if point then
-                Mode = "NEXT ROOM"
+                Mode =
+                    routePoint
+                    and "ROUTE"
+                    or "NEXT ROOM"
+
                 DesiredSpeed = NEXT_ROOM_SPEED
 
                 local delta =
@@ -5761,7 +6054,7 @@ connect(
                 end
 
                 if now - BlockedSince
-                    >= BLOCKED_DELAY then
+                    >= CFG.BLOCKED_DELAY then
 
                     local changed =
                         not PathDestination
@@ -6597,7 +6890,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.6",
+                    Version = "V7.7",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -6996,6 +7289,10 @@ local function createInterface()
                         .. tostring(LastRoomOrder)
                         .. "\nPath: "
                         .. pathText
+                        .. " | Route:"
+                        .. tostring(State.RouteIndex or 0)
+                        .. "/"
+                        .. tostring(State.RouteCount or 0)
                         .. " | Stuck:"
                         .. tostring(StuckCount)
                         .. " | Still:"
@@ -7028,7 +7325,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.6",
+                "Combat Pilot V7.7",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -7046,5 +7343,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.6 loaded"
+    "Dungeon Quest Combat Pilot V7.7 loaded"
 )

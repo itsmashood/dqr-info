@@ -1,5 +1,5 @@
---// Dungeon Quest Combat Pilot V7.7
---// Left/right committed dodge + expanding hazard prediction
+--// Dungeon Quest Combat Pilot V7.8
+--// Safe-gap committed dodge + expanding hazard prediction
 --// Dense mob-cluster aim + full respawn combat reset
 --// Continuous close-range Q/E spam enabled by default
 --// Maximum WalkSpeed = 20
@@ -111,7 +111,12 @@ local CFG = {
     QUICK_DODGE_DISTANCE = 10,
     DODGE_RADII = {8, 13, 19, 27, 34},
     EVADE_RADII = {7, 11, 16},
-    ROUTE_SAMPLES = 7,
+    SAFE_GAP_DIRECTIONS = 20,
+    SAFE_GAP_FALLBACK_PENALTY = 10,
+    SAFE_GAP_SIDE_SWITCH_PENALTY = 8,
+    BOSS_SAFE_RING_INNER = 15,
+    BOSS_SAFE_RING_OUTER = 23,
+    ROUTE_SAMPLES = 9,
     TOP_CANDIDATES = 24,
     PATH_RECALC = 0.60,
     BLOCKED_DELAY = 0.16,
@@ -176,7 +181,8 @@ local oldStates = {
     "DQ_COMBAT_V74",
     "DQ_COMBAT_V75",
     "DQ_COMBAT_V76",
-    "DQ_COMBAT_V77"
+    "DQ_COMBAT_V77",
+    "DQ_COMBAT_V78"
 }
 
 for _, name in ipairs(oldStates) do
@@ -198,7 +204,7 @@ local oldRenderNames = {
     "DQ_COMBAT_V74_RENDER",
     "DQ_COMBAT_V75_RENDER",
     "DQ_COMBAT_V76_RENDER",
-    "DQ_COMBAT_V77_RENDER"
+    "DQ_COMBAT_V78_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -210,7 +216,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V77_RENDER",
+    RenderName = "DQ_COMBAT_V78_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -220,7 +226,7 @@ local State = {
     BossCheckTime = 0
 }
 
-ENV.DQ_COMBAT_V77 = State
+ENV.DQ_COMBAT_V78 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -241,7 +247,7 @@ pcall(function()
         "DQCombatV74",
         "DQCombatV75",
         "DQCombatV76",
-        "DQCombatV77",
+        "DQCombatV78",
         "XyneriaUI",
         "WindUI"
     }
@@ -1848,7 +1854,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V77_Hazard"
+        "DQ_V78_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3762,6 +3768,127 @@ local function candidateDirections(
     return directions
 end
 
+--------------------------------------------------
+-- SAFE-GAP DIRECTIONS
+--
+-- The fast first reaction above remains a committed
+-- left/right strafe.  The full solver can then use a
+-- nearby diagonal gap when overlapping or radial
+-- telegraphs make pure lateral movement unsafe.
+--------------------------------------------------
+
+local function safeGapDirections(
+    root,
+    threat,
+    enemy
+)
+    local directions =
+        candidateDirections(
+            root,
+            threat,
+            enemy
+        )
+
+    local enemyLeft = nil
+
+    if validEnemy(enemy) then
+        local enemyRoot =
+            enemy:FindFirstChild(
+                "HumanoidRootPart"
+            )
+
+        if enemyRoot then
+            local toward =
+                flat(
+                    enemyRoot.Position
+                    - root.Position
+                )
+
+            if toward.Magnitude > 0.05 then
+                toward = toward.Unit
+
+                enemyLeft =
+                    Vector3.new(
+                        -toward.Z,
+                        0,
+                        toward.X
+                    )
+            end
+        end
+    end
+
+    local function addGap(direction)
+        direction = flat(direction)
+
+        if direction.Magnitude < 0.05 then
+            return
+        end
+
+        direction = direction.Unit
+
+        for _, existing in ipairs(
+            directions
+        ) do
+            if existing.Direction:Dot(
+                direction
+            ) > 0.985 then
+
+                return
+            end
+        end
+
+        local side = DodgeSide
+
+        if enemyLeft then
+            side =
+                direction:Dot(enemyLeft) >= 0
+                and "LEFT"
+                or "RIGHT"
+        elseif side == "NONE" then
+            side = "LEFT"
+        end
+
+        table.insert(
+            directions,
+            {
+                Direction = direction,
+                Side = side,
+                OutwardFallback = false,
+                SafeGapFallback = true
+            }
+        )
+    end
+
+    local baseAngle = 0
+
+    if CurrentDodgeDirection then
+        baseAngle = math.atan2(
+            CurrentDodgeDirection.Z,
+            CurrentDodgeDirection.X
+        )
+    end
+
+    for index = 0,
+        CFG.SAFE_GAP_DIRECTIONS - 1 do
+
+        local angle =
+            baseAngle
+            + math.pi * 2
+                * index
+                / CFG.SAFE_GAP_DIRECTIONS
+
+        addGap(
+            Vector3.new(
+                math.cos(angle),
+                0,
+                math.sin(angle)
+            )
+        )
+    end
+
+    return directions
+end
+
 local function committedLateralFallback(
     root,
     enemy,
@@ -4030,7 +4157,7 @@ local function findEscape(
     soft
 )
     local directions =
-        candidateDirections(
+        safeGapDirections(
             root,
             threat,
             enemy
@@ -4086,6 +4213,20 @@ local function findEscape(
                     score = score + 100
                 end
 
+                if entry.SafeGapFallback then
+                    score =
+                        score
+                        + CFG.SAFE_GAP_FALLBACK_PENALTY
+                end
+
+                if DodgeSide ~= "NONE"
+                    and entry.Side ~= DodgeSide then
+
+                    score =
+                        score
+                        + CFG.SAFE_GAP_SIDE_SWITCH_PENALTY
+                end
+
                 if validEnemy(enemy) then
                     local enemyRoot =
                         enemy:FindFirstChild(
@@ -4104,6 +4245,38 @@ local function findEscape(
                         if enemyDistance < 8 then
                             score =
                                 score + 30
+
+                        elseif State:IsBossEnemy(enemy) then
+                            if enemyDistance
+                                < CFG.BOSS_SAFE_RING_INNER then
+
+                                score =
+                                    score
+                                    + 35
+                                    + (
+                                        CFG.BOSS_SAFE_RING_INNER
+                                        - enemyDistance
+                                    ) * 12
+
+                            elseif enemyDistance
+                                > CFG.BOSS_SAFE_RING_OUTER then
+
+                                score =
+                                    score
+                                    + 45
+                                    + (
+                                        enemyDistance
+                                        - CFG.BOSS_SAFE_RING_OUTER
+                                    ) * 14
+
+                            else
+                                score =
+                                    score
+                                    + math.abs(
+                                        enemyDistance
+                                        - DESIRED_DISTANCE
+                                    ) * 1.4
+                            end
 
                         elseif soft then
                             score =
@@ -4408,7 +4581,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V77_FacingAttachment"
+        "DQ_V78_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -4419,7 +4592,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V77_Facing"
+        "DQ_V78_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -5116,6 +5289,8 @@ local function stationaryResetCheck(root)
         or Mode == "COOLDOWN"
         or Mode == "RANGED"
         or Mode == "BOSS HOLD"
+        or Mode == "DODGE HOLD"
+        or Mode == "EVADE HOLD"
         or Mode == "RESETTING"
 
     local movementExpected =
@@ -5696,6 +5871,13 @@ connect(
                 return
             end
 
+            if level == "EMERGENCY" then
+                Mode = "DODGE HOLD"
+                DesiredSpeed = 0
+                DesiredDirection = Vector3.zero
+                return
+            end
+
             if level ~= "EMERGENCY" then
                 DodgePoint = nil
                 CurrentDodgeDirection = nil
@@ -5733,17 +5915,6 @@ connect(
                 replan = true
             end
 
-            if EvadePoint
-                and (
-                    flat(
-                        EvadePoint
-                        - root.Position
-                    )
-                ).Magnitude < 2.5 then
-
-                replan = true
-            end
-
             if replan
                 and now - LastEvadePlan
                     >= CFG.EVADE_REPLAN then
@@ -5769,14 +5940,25 @@ connect(
             end
 
             if EvadePoint then
-                DesiredDirection =
-                    wallSteer(
+                local delta =
+                    flat(
                         EvadePoint
-                        - root.Position,
-
-                        root,
-                        character
+                        - root.Position
                     )
+
+                if delta.Magnitude < 2.2 then
+                    Mode = "EVADE HOLD"
+                    DesiredSpeed = 0
+                    DesiredDirection = Vector3.zero
+
+                else
+                    DesiredDirection =
+                        wallSteer(
+                            delta,
+                            root,
+                            character
+                        )
+                end
 
                 return
             end
@@ -6890,7 +7072,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.7",
+                    Version = "V7.8",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -7325,7 +7507,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.7",
+                "Combat Pilot V7.8",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -7343,5 +7525,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.7 loaded"
+    "Dungeon Quest Combat Pilot V7.8 loaded"
 )

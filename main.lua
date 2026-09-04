@@ -1,4 +1,4 @@
---// Dungeon Quest Combat Pilot V7.5
+--// Dungeon Quest Combat Pilot V7.6
 --// Left/right committed dodge + expanding hazard prediction
 --// Dense mob-cluster aim + full respawn combat reset
 --// Continuous close-range Q/E spam enabled by default
@@ -67,7 +67,7 @@ local SHOW_HAZARD_BOXES = false
 
 local DUNGEON_PROFILE_BASE_URL =
     ENV.DQ_DUNGEON_PROFILE_BASE_URL
-    or "https://raw.githubusercontent.com/itsmashood/dungeon-quest-info/main"
+    or "https://raw.githubusercontent.com/itsmashood/dqr-info/main"
 
 --------------------------------------------------
 -- PREDICTION
@@ -209,7 +209,8 @@ local oldStates = {
     "DQ_COMBAT_V72",
     "DQ_COMBAT_V73",
     "DQ_COMBAT_V74",
-    "DQ_COMBAT_V75"
+    "DQ_COMBAT_V75",
+    "DQ_COMBAT_V76"
 }
 
 for _, name in ipairs(oldStates) do
@@ -229,7 +230,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V72_RENDER",
     "DQ_COMBAT_V73_RENDER",
     "DQ_COMBAT_V74_RENDER",
-    "DQ_COMBAT_V75_RENDER"
+    "DQ_COMBAT_V75_RENDER",
+    "DQ_COMBAT_V76_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -241,7 +243,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V75_RENDER",
+    RenderName = "DQ_COMBAT_V76_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -251,7 +253,7 @@ local State = {
     BossCheckTime = 0
 }
 
-ENV.DQ_COMBAT_V75 = State
+ENV.DQ_COMBAT_V76 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -271,6 +273,7 @@ pcall(function()
         "DQCombatV73",
         "DQCombatV74",
         "DQCombatV75",
+        "DQCombatV76",
         "XyneriaUI",
         "WindUI"
     }
@@ -596,7 +599,6 @@ local DungeonData = (function()
                 game:HttpGet(
                     joinUrl(
                         DUNGEON_PROFILE_BASE_URL,
-                        "dungeons",
                         fileName
                     )
                 ),
@@ -1582,7 +1584,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V75_Hazard"
+        "DQ_V76_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -4141,7 +4143,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V75_FacingAttachment"
+        "DQ_V76_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -4152,7 +4154,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V75_Facing"
+        "DQ_V76_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -6595,7 +6597,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.5",
+                    Version = "V7.6",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -7026,7 +7028,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.5",
+                "Combat Pilot V7.6",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -7044,5 +7046,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.5 loaded"
+    "Dungeon Quest Combat Pilot V7.6 loaded"
 )

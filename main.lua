@@ -1,4 +1,4 @@
---// Dungeon Quest Combat Pilot V7.8
+--// Dungeon Quest Combat Pilot V7.9
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Dense mob-cluster aim + full respawn combat reset
 --// Continuous close-range Q/E spam enabled by default
@@ -52,7 +52,8 @@ local BOB_LEASH_DISTANCE = 26
 local LEASH_INWARD_START = 4
 local LEASH_MAX_INWARD = 0.72
 
-local ABILITY_RANGE = 30
+local Q_ABILITY_RANGE = 55
+local E_ABILITY_RANGE = 42
 local REMOTE_ABILITY_RANGE = 160
 local REMOTE_PROGRESS_TIMEOUT = 1.35
 local REMOTE_PROGRESS_STEP = 2.0
@@ -61,7 +62,7 @@ local FACE_DOT_REQUIRED = 0.93
 
 local PACK_CLEAR_GRACE = 0.55
 local SPELL_FALLBACK_COOLDOWN = 8.5
-local SPELL_SPAM_INTERVAL = 0.25
+local SPELL_SPAM_INTERVAL = 0.50
 local OWN_BUFF_IGNORE_TIME = 1.35
 local OWN_BUFF_IGNORE_RADIUS = 16
 local SHOW_HAZARD_BOXES = false
@@ -182,7 +183,8 @@ local oldStates = {
     "DQ_COMBAT_V75",
     "DQ_COMBAT_V76",
     "DQ_COMBAT_V77",
-    "DQ_COMBAT_V78"
+    "DQ_COMBAT_V78",
+    "DQ_COMBAT_V79"
 }
 
 for _, name in ipairs(oldStates) do
@@ -204,7 +206,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V74_RENDER",
     "DQ_COMBAT_V75_RENDER",
     "DQ_COMBAT_V76_RENDER",
-    "DQ_COMBAT_V78_RENDER"
+    "DQ_COMBAT_V78_RENDER",
+    "DQ_COMBAT_V79_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -216,7 +219,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V78_RENDER",
+    RenderName = "DQ_COMBAT_V79_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -226,7 +229,7 @@ local State = {
     BossCheckTime = 0
 }
 
-ENV.DQ_COMBAT_V78 = State
+ENV.DQ_COMBAT_V79 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -247,7 +250,7 @@ pcall(function()
         "DQCombatV74",
         "DQCombatV75",
         "DQCombatV76",
-        "DQCombatV78",
+        "DQCombatV79",
         "XyneriaUI",
         "WindUI"
     }
@@ -1854,7 +1857,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V78_Hazard"
+        "DQ_V79_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -4581,7 +4584,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V78_FacingAttachment"
+        "DQ_V79_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -4592,7 +4595,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V78_Facing"
+        "DQ_V79_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -4695,7 +4698,9 @@ local SpellFlow = (function()
         LastQ = -math.huge,
         LastE = -math.huge,
         ClearedAt = 0,
-        KeyBusy = {}
+        KeyBusy = {},
+        QAttempts = 0,
+        EAttempts = 0
     }
 
     local function packKey(target)
@@ -4722,7 +4727,62 @@ local SpellFlow = (function()
         return target.Parent or target
     end
 
-    local function pressKey(key, fallback)
+    local function activateAbilityButton(letter)
+        local playerGui =
+            LP:FindFirstChildOfClass(
+                "PlayerGui"
+            )
+
+        if not playerGui then
+            return false
+        end
+
+        for _, object in ipairs(
+            playerGui:GetDescendants()
+        ) do
+            if object:IsA("TextLabel")
+                or object:IsA("TextButton") then
+
+                local textValue =
+                    string.upper(
+                        tostring(object.Text or "")
+                    ):gsub("%s+", "")
+
+                if textValue == letter then
+                    local current = object
+
+                    for _ = 1, 5 do
+                        if not current
+                            or current == playerGui then
+
+                            break
+                        end
+
+                        if current:IsA("GuiButton") then
+                            local success =
+                                pcall(function()
+                                    current:Activate()
+                                end)
+
+                            if success then
+                                return true
+                            end
+                        end
+
+                        current = current.Parent
+                    end
+                end
+            end
+        end
+
+        return false
+    end
+
+    local function pressKey(
+        key,
+        fallback,
+        letter
+    )
         if flow.KeyBusy[key] then
             return
         end
@@ -4730,7 +4790,20 @@ local SpellFlow = (function()
         flow.KeyBusy[key] = true
 
         task.spawn(function()
-            local success = pcall(function()
+            -- Delta and other mobile executors can report a
+            -- successful VirtualInputManager call even when the
+            -- game ignores it.  Send the executor input first,
+            -- then VIM, and finally activate the visible ability
+            -- button when one exists.
+            if keypress and keyrelease then
+                pcall(function()
+                    keypress(fallback)
+                    task.wait(0.060)
+                    keyrelease(fallback)
+                end)
+            end
+
+            pcall(function()
                 VirtualInputManager:SendKeyEvent(
                     true,
                     key,
@@ -4738,7 +4811,7 @@ local SpellFlow = (function()
                     game
                 )
 
-                task.wait(0.035)
+                task.wait(0.060)
 
                 VirtualInputManager:SendKeyEvent(
                     false,
@@ -4748,15 +4821,8 @@ local SpellFlow = (function()
                 )
             end)
 
-            if not success
-                and keypress
-                and keyrelease then
-
-                pcall(function()
-                    keypress(fallback)
-                    task.wait(0.035)
-                    keyrelease(fallback)
-                end)
+            if letter then
+                activateAbilityButton(letter)
             end
 
             flow.KeyBusy[key] = nil
@@ -4904,6 +4970,38 @@ local SpellFlow = (function()
         self.LastE = -math.huge
         self.ClearedAt = 0
         self.KeyBusy = {}
+        self.QAttempts = 0
+        self.EAttempts = 0
+    end
+
+    function flow:CastNow(letter)
+        local now = os.clock()
+
+        if letter == "Q" then
+            self.LastQ = now
+            self.QAttempts =
+                self.QAttempts + 1
+
+            State.OwnAbilityIgnoreUntil =
+                now + OWN_BUFF_IGNORE_TIME
+
+            pressKey(
+                Enum.KeyCode.Q,
+                0x51,
+                "Q"
+            )
+
+        elseif letter == "E" then
+            self.LastE = now
+            self.EAttempts =
+                self.EAttempts + 1
+
+            pressKey(
+                Enum.KeyCode.E,
+                0x45,
+                "E"
+            )
+        end
     end
 
     function flow:Observe(target, now)
@@ -4963,7 +5061,10 @@ local SpellFlow = (function()
 
     function flow:Status()
         if State.SpamSpells then
-            return "SPAM MODE"
+            return "SPAM Q:"
+                .. tostring(self.QAttempts)
+                .. " E:"
+                .. tostring(self.EAttempts)
         end
 
         if State.TargetIsBoss then
@@ -5001,50 +5102,57 @@ local SpellFlow = (function()
         mode,
         remoteCast
     )
-        local extendedCast =
+        local qRange =
             remoteCast
-            and not State.SpamSpells
-
-        local allowedRange =
-            extendedCast
             and REMOTE_ABILITY_RANGE
-            or ABILITY_RANGE
+            or Q_ABILITY_RANGE
+
+        local eRange =
+            remoteCast
+            and REMOTE_ABILITY_RANGE
+            or E_ABILITY_RANGE
 
         local now = os.clock()
 
         if State.SpamSpells
             or State.TargetIsBoss then
-            if not validEnemy(target)
-                or distance > allowedRange then
+            if not validEnemy(target) then
 
                 return
             end
 
             if AUTO_Q
+                and distance <= qRange
                 and now - self.LastQ
                     >= SPELL_SPAM_INTERVAL then
 
                 self.LastQ = now
+                self.QAttempts =
+                    self.QAttempts + 1
 
                 State.OwnAbilityIgnoreUntil =
                     now + OWN_BUFF_IGNORE_TIME
 
                 pressKey(
                     Enum.KeyCode.Q,
-                    0x51
+                    0x51,
+                    "Q"
                 )
             end
 
             if AUTO_E
-                and facing
+                and distance <= eRange
                 and now - self.LastE
                     >= SPELL_SPAM_INTERVAL then
 
                 self.LastE = now
+                self.EAttempts =
+                    self.EAttempts + 1
 
                 pressKey(
                     Enum.KeyCode.E,
-                    0x45
+                    0x45,
+                    "E"
                 )
             end
 
@@ -5063,35 +5171,43 @@ local SpellFlow = (function()
         if not self.PackActive
             or self.Waiting
             or not validEnemy(target)
-            or distance > allowedRange
             or mode == "DODGE" then
 
             return
         end
 
-        if AUTO_Q and not self.QUsed then
+        if AUTO_Q
+            and not self.QUsed
+            and distance <= qRange then
+
             self.QUsed = true
             self.LastQ = now
+            self.QAttempts =
+                self.QAttempts + 1
 
             State.OwnAbilityIgnoreUntil =
                 now + OWN_BUFF_IGNORE_TIME
 
             pressKey(
                 Enum.KeyCode.Q,
-                0x51
+                0x51,
+                "Q"
             )
         end
 
         if AUTO_E
             and not self.EUsed
-            and facing then
+            and distance <= eRange then
 
             self.EUsed = true
             self.LastE = now
+            self.EAttempts =
+                self.EAttempts + 1
 
             pressKey(
                 Enum.KeyCode.E,
-                0x45
+                0x45,
+                "E"
             )
         end
     end
@@ -5367,7 +5483,7 @@ local function updateRemoteCastMode(
     end
 
     if not validEnemy(target)
-        or distance <= ABILITY_RANGE - 4
+        or distance <= E_ABILITY_RANGE - 4
         or distance > REMOTE_ABILITY_RANGE then
 
         RemoteCastMode = false
@@ -7072,7 +7188,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.8",
+                    Version = "V7.9",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -7137,9 +7253,9 @@ local function createInterface()
                 Value = ENABLED,
                 Flag = "DQCombatPilot",
                 Callback = function(value)
-                    ENABLED = value
+                    ENABLED = value ~= false
 
-                    if not value then
+                    if not ENABLED then
                         DesiredDirection =
                             Vector3.zero
                     end
@@ -7148,21 +7264,21 @@ local function createInterface()
 
             combatControls:Toggle({
                 Title = "Auto Q — Inner Focus",
-                Desc = "Cast once at the start of each mob pack",
+                Desc = "Automatically cast Inner Focus near enemies",
                 Value = AUTO_Q,
                 Flag = "DQAutoQ",
                 Callback = function(value)
-                    AUTO_Q = value
+                    AUTO_Q = value ~= false
                 end
             })
 
             combatControls:Toggle({
                 Title = "Auto E — Geyser",
-                Desc = "Cast once at the start of each mob pack",
+                Desc = "Automatically cast Geyser near enemies",
                 Value = AUTO_E,
                 Flag = "DQAutoE",
                 Callback = function(value)
-                    AUTO_E = value
+                    AUTO_E = value ~= false
                 end
             })
 
@@ -7172,7 +7288,26 @@ local function createInterface()
                 Value = State.SpamSpells,
                 Flag = "DQSpamSpells",
                 Callback = function(value)
-                    State.SpamSpells = value
+                    State.SpamSpells =
+                        value ~= false
+                end
+            })
+
+            combatControls:Button({
+                Title = "Cast Q now",
+                Desc = "Test Inner Focus input immediately",
+                Icon = "zap",
+                Callback = function()
+                    SpellFlow:CastNow("Q")
+                end
+            })
+
+            combatControls:Button({
+                Title = "Cast E now",
+                Desc = "Test Geyser input immediately",
+                Icon = "waves",
+                Callback = function()
+                    SpellFlow:CastNow("E")
                 end
             })
 
@@ -7507,7 +7642,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.8",
+                "Combat Pilot V7.9",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -7525,5 +7660,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.8 loaded"
+    "Dungeon Quest Combat Pilot V7.9 loaded"
 )

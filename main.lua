@@ -1,16 +1,16 @@
---// Dungeon Quest Combat Pilot V7.9
+--// Dungeon Quest Combat Pilot V7.12
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Dense mob-cluster aim + full respawn combat reset
---// Continuous close-range Q/E spam enabled by default
+--// Dynamic spell data + buff-first paired casting
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
 --// Soft profile routes: combat/dodging free-roam, then forward route rejoin
 --//
---// Q = Inner Focus
---// E = Geyser
+--// Q / E are detected from their live abilitySlot values
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 local PathfindingService = game:GetService("PathfindingService")
@@ -46,15 +46,19 @@ local FORCE_SPACE_EXIT = 17
 
 local MOB_CLUSTER_RADIUS = 24
 local MOB_CLUSTER_STICK_RADIUS = 13
+local MOB_CLUSTER_SEARCH_EXTRA = 55
+local MOB_CLUSTER_MAX_DISTANCE = 120
+local MOB_CLUSTER_DENSITY_BONUS = 12
+local MOB_CLUSTER_VERTICAL_LIMIT = 28
 
 local TARGET_LEASH_DISTANCE = 30
 local BOB_LEASH_DISTANCE = 26
 local LEASH_INWARD_START = 4
 local LEASH_MAX_INWARD = 0.72
 
-local Q_ABILITY_RANGE = 55
-local E_ABILITY_RANGE = 42
-local REMOTE_ABILITY_RANGE = 160
+local Q_ABILITY_RANGE = 38
+local E_ABILITY_RANGE = 38
+local TAUNT_ABILITY_RANGE = 22
 local REMOTE_PROGRESS_TIMEOUT = 1.35
 local REMOTE_PROGRESS_STEP = 2.0
 local REMOTE_CAST_HOLD = 5.0
@@ -63,6 +67,11 @@ local FACE_DOT_REQUIRED = 0.93
 local PACK_CLEAR_GRACE = 0.55
 local SPELL_FALLBACK_COOLDOWN = 8.5
 local SPELL_SPAM_INTERVAL = 0.50
+local ABILITY_SCAN_INTERVAL = 0.20
+local PAIR_CAST_START_TIMEOUT = 0.55
+local PAIR_CAST_CLEAR_TIMEOUT = 1.60
+local PAIR_CAST_POLL = 0.025
+local PAIR_CAST_FALLBACK_GAP = 0.10
 local OWN_BUFF_IGNORE_TIME = 1.35
 local OWN_BUFF_IGNORE_RADIUS = 16
 local SHOW_HAZARD_BOXES = false
@@ -184,7 +193,10 @@ local oldStates = {
     "DQ_COMBAT_V76",
     "DQ_COMBAT_V77",
     "DQ_COMBAT_V78",
-    "DQ_COMBAT_V79"
+    "DQ_COMBAT_V79",
+    "DQ_COMBAT_V710",
+    "DQ_COMBAT_V711",
+    "DQ_COMBAT_V712"
 }
 
 for _, name in ipairs(oldStates) do
@@ -207,7 +219,10 @@ local oldRenderNames = {
     "DQ_COMBAT_V75_RENDER",
     "DQ_COMBAT_V76_RENDER",
     "DQ_COMBAT_V78_RENDER",
-    "DQ_COMBAT_V79_RENDER"
+    "DQ_COMBAT_V79_RENDER",
+    "DQ_COMBAT_V710_RENDER",
+    "DQ_COMBAT_V711_RENDER",
+    "DQ_COMBAT_V712_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -219,7 +234,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V79_RENDER",
+    RenderName = "DQ_COMBAT_V712_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -229,7 +244,7 @@ local State = {
     BossCheckTime = 0
 }
 
-ENV.DQ_COMBAT_V79 = State
+ENV.DQ_COMBAT_V712 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -250,7 +265,8 @@ pcall(function()
         "DQCombatV74",
         "DQCombatV75",
         "DQCombatV76",
-        "DQCombatV79",
+        "DQCombatV711",
+        "DQCombatV712",
         "XyneriaUI",
         "WindUI"
     }
@@ -365,6 +381,16 @@ local function isOwnAbility(object)
             )
             or name:find(
                 "inner focus",
+                1,
+                true
+            )
+            or name:find(
+                "innerrage",
+                1,
+                true
+            )
+            or name:find(
+                "inner rage",
                 1,
                 true
             ) then
@@ -1024,26 +1050,47 @@ local function chooseTarget(
         )
     end
 
-    -- Only consider enemies in the nearest active enemy
-    -- folder. This keeps room progression intact while still
-    -- preferring three grouped mobs over one isolated mob.
-    local activeFolder = closest.Parent
+    -- Build clusters from every nearby enemy rather than
+    -- locking combat to the nearest enemy folder or a mapped
+    -- pack order. Distance still limits acquisition so a huge
+    -- group across the dungeon cannot pull the player away.
     local candidates = {}
+    local searchLimit =
+        math.min(
+            closestDistance
+                + MOB_CLUSTER_SEARCH_EXTRA,
+            MOB_CLUSTER_MAX_DISTANCE
+        )
 
     for enemy in pairs(Enemies) do
         if not validEnemy(enemy) then
             Enemies[enemy] = nil
 
-        elseif enemy.Parent == activeFolder then
+        elseif not State:IsBossEnemy(enemy) then
             local enemyPosition =
                 enemyWorldPosition(enemy)
 
-            if enemyPosition then
+            local enemyDistance =
+                enemyPosition
+                and (
+                    flat(enemyPosition)
+                    - flat(position)
+                ).Magnitude
+                or math.huge
+
+            if enemyPosition
+                and enemyDistance <= searchLimit
+                and math.abs(
+                    enemyPosition.Y
+                    - position.Y
+                ) <= MOB_CLUSTER_VERTICAL_LIMIT then
+
                 table.insert(
                     candidates,
                     {
                         Enemy = enemy,
-                        Position = enemyPosition
+                        Position = enemyPosition,
+                        Distance = enemyDistance
                     }
                 )
             end
@@ -1061,6 +1108,7 @@ local function chooseTarget(
     local bestCentre = nil
     local bestCount = 0
     local bestDistance = math.huge
+    local bestScore = math.huge
 
     for _, seed in ipairs(candidates) do
         local members = {}
@@ -1084,9 +1132,16 @@ local function chooseTarget(
                 - flat(position)
             ).Magnitude
 
-        if #members > bestCount
+        local score =
+            centreDistance
+            - math.max(
+                #members - 1,
+                0
+            ) * MOB_CLUSTER_DENSITY_BONUS
+
+        if score < bestScore
             or (
-                #members == bestCount
+                math.abs(score - bestScore) < 0.01
                 and centreDistance < bestDistance
             ) then
 
@@ -1094,6 +1149,7 @@ local function chooseTarget(
             bestCentre = centre
             bestCount = #members
             bestDistance = centreDistance
+            bestScore = score
         end
     end
 
@@ -1104,12 +1160,16 @@ local function chooseTarget(
     -- actually part of the winning group, but immediately
     -- abandon an isolated target for the denser cluster.
     if validEnemy(currentTarget)
-        and currentTarget.Parent == activeFolder then
+        and not State:IsBossEnemy(currentTarget) then
 
         local currentPosition =
             enemyWorldPosition(currentTarget)
 
         if currentPosition
+            and (
+                flat(currentPosition)
+                - flat(position)
+            ).Magnitude <= searchLimit
             and (
                 flat(currentPosition)
                 - flat(bestCentre)
@@ -1857,7 +1917,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V79_Hazard"
+        "DQ_V712_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -4584,7 +4644,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V79_FacingAttachment"
+        "DQ_V712_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -4595,7 +4655,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V79_Facing"
+        "DQ_V712_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -4687,6 +4747,365 @@ end
 -- Q / E: ONCE PER MOB PACK + COOLDOWN GATE
 --------------------------------------------------
 
+local BUFF_ABILITY_NAMES = {
+    ["inner focus"] = true,
+    ["enhanced inner focus"] = true,
+    ["inner rage"] = true,
+    ["enhanced inner rage"] = true
+}
+
+local TAUNT_ABILITY_NAMES = {
+    ["taunt"] = true,
+    ["guardian roar"] = true
+}
+
+local KNOWN_ABILITY_RANGES = {
+    ["geyser"] = 38
+}
+
+local AbilityRuntime = {
+    Q = nil,
+    E = nil,
+    LastScan = -math.huge
+}
+
+local function normalizedAbilityName(value)
+    return string.lower(
+        tostring(value or ""):
+            gsub("_", " "):
+            gsub("%s+", " "):
+            match("^%s*(.-)%s*$")
+    )
+end
+
+local function directValueObject(
+    container,
+    name
+)
+    if not container then
+        return nil
+    end
+
+    local object =
+        container:FindFirstChild(name)
+
+    if object
+        and object:IsA("ValueBase") then
+
+        return object
+    end
+
+    return nil
+end
+
+local function numericAbilityValue(
+    container,
+    names
+)
+    for _, name in ipairs(names) do
+        local object =
+            directValueObject(
+                container,
+                name
+            )
+
+        if object
+            and type(object.Value) == "number" then
+
+            return object.Value
+        end
+
+        local attribute = nil
+
+        pcall(function()
+            attribute =
+                container:GetAttribute(name)
+        end)
+
+        if type(attribute) == "number" then
+            return attribute
+        end
+    end
+
+    return nil
+end
+
+local function classifyAbility(name)
+    local normalized =
+        normalizedAbilityName(name)
+
+    if BUFF_ABILITY_NAMES[normalized] then
+        return "BUFF"
+    end
+
+    if TAUNT_ABILITY_NAMES[normalized]
+        or normalized:find(
+            "taunt",
+            1,
+            true
+        ) then
+
+        return "TAUNT"
+    end
+
+    return "ATTACK"
+end
+
+local function makeAbilityInfo(
+    letter,
+    object
+)
+    if not object then
+        return nil
+    end
+
+    local name = object.Name
+    local normalized =
+        normalizedAbilityName(name)
+    local kind = classifyAbility(name)
+
+    local range =
+        numericAbilityValue(
+            object,
+            {
+                "range",
+                "castRange",
+                "maxRange",
+                "abilityRange"
+            }
+        )
+
+    if type(range) == "number"
+        and range > 4 then
+
+        range = math.max(4, range - 2)
+    else
+        range =
+            KNOWN_ABILITY_RANGES[normalized]
+            or (
+                kind == "BUFF"
+                and math.huge
+                or kind == "TAUNT"
+                    and TAUNT_ABILITY_RANGE
+                or letter == "Q"
+                    and Q_ABILITY_RANGE
+                or E_ABILITY_RANGE
+            )
+    end
+
+    return {
+        Letter = letter,
+        Object = object,
+        Name = name,
+        NormalizedName = normalized,
+        Kind = kind,
+        Range = range,
+        Cooldown =
+            directValueObject(
+                object,
+                "cooldown"
+            ),
+        CooldownLength =
+            numericAbilityValue(
+                object,
+                {"cooldownLength"}
+            )
+    }
+end
+
+local function refreshAbilityRuntime(force)
+    local now = os.clock()
+
+    if not force
+        and now - AbilityRuntime.LastScan
+            < ABILITY_SCAN_INTERVAL then
+
+        local qValid =
+            not AbilityRuntime.Q
+            or AbilityRuntime.Q.Object.Parent
+
+        local eValid =
+            not AbilityRuntime.E
+            or AbilityRuntime.E.Object.Parent
+
+        if qValid and eValid then
+            return
+        end
+    end
+
+    AbilityRuntime.LastScan = now
+    AbilityRuntime.Q = nil
+    AbilityRuntime.E = nil
+
+    local roots = {
+        LP:FindFirstChildOfClass(
+            "Backpack"
+        ),
+        LP.Character
+    }
+
+    for _, root in ipairs(roots) do
+        if root then
+            for _, candidate in ipairs(
+                root:GetChildren()
+            ) do
+                local slotObject =
+                    directValueObject(
+                        candidate,
+                        "abilitySlot"
+                    )
+
+                local slot =
+                    slotObject
+                    and string.upper(
+                        tostring(
+                            slotObject.Value
+                        )
+                    )
+
+                if slot == "Q"
+                    or slot == "E" then
+
+                    AbilityRuntime[slot] =
+                        makeAbilityInfo(
+                            slot,
+                            candidate
+                        )
+                end
+            end
+        end
+    end
+end
+
+local function currentAbility(letter)
+    refreshAbilityRuntime(false)
+    return AbilityRuntime[letter]
+end
+
+local function currentAbilityReady(letter)
+    local ability =
+        currentAbility(letter)
+
+    if not ability then
+        return true, false
+    end
+
+    local cooldown = ability.Cooldown
+
+    if cooldown
+        and cooldown.Parent
+        and type(cooldown.Value)
+            == "number" then
+
+        return cooldown.Value <= 0.05, true
+    end
+
+    return true, false
+end
+
+local function currentCooldownLength(letter)
+    local ability =
+        currentAbility(letter)
+
+    return ability
+        and ability.CooldownLength
+        or SPELL_FALLBACK_COOLDOWN
+end
+
+local function currentAbilityRange(letter)
+    local ability =
+        currentAbility(letter)
+
+    return ability
+        and ability.Range
+        or letter == "Q"
+            and Q_ABILITY_RANGE
+        or E_ABILITY_RANGE
+end
+
+local function currentAbilityKind(letter)
+    local ability =
+        currentAbility(letter)
+
+    return ability
+        and ability.Kind
+        or "ATTACK"
+end
+
+local function currentAbilityName(letter)
+    local ability =
+        currentAbility(letter)
+
+    return ability
+        and ability.Name
+        or letter
+end
+
+local function pairedAbilityRanges()
+    local qRange = currentAbilityRange("Q")
+    local eRange = currentAbilityRange("E")
+    local qBuff =
+        currentAbilityKind("Q") == "BUFF"
+    local eBuff =
+        currentAbilityKind("E") == "BUFF"
+
+    if qBuff and eBuff then
+        qRange = Q_ABILITY_RANGE
+        eRange = E_ABILITY_RANGE
+    elseif qBuff then
+        qRange = eRange
+    elseif eBuff then
+        eRange = qRange
+    end
+
+    return qRange, eRange, qBuff, eBuff
+end
+
+local function maximumOffensiveRange()
+    local maximum = 0
+
+    if AUTO_Q
+        and currentAbilityKind("Q")
+            ~= "BUFF" then
+
+        maximum = math.max(
+            maximum,
+            currentAbilityRange("Q")
+        )
+    end
+
+    if AUTO_E
+        and currentAbilityKind("E")
+            ~= "BUFF" then
+
+        maximum = math.max(
+            maximum,
+            currentAbilityRange("E")
+        )
+    end
+
+    return maximum > 0
+        and maximum
+        or math.max(
+            Q_ABILITY_RANGE,
+            E_ABILITY_RANGE
+        )
+end
+
+local function characterBusyCasting()
+    local character = LP.Character
+    local value =
+        character
+        and character:FindFirstChild(
+            "busyCasting"
+        )
+
+    return value
+        and value:IsA("BoolValue")
+        and value.Value == true
+        or false
+end
+
 local SpellFlow = (function()
     local flow = {
         ActiveKey = nil,
@@ -4699,6 +5118,9 @@ local SpellFlow = (function()
         LastE = -math.huge,
         ClearedAt = 0,
         KeyBusy = {},
+        PairBusy = false,
+        PairToken = 0,
+        PairOrder = nil,
         QAttempts = 0,
         EAttempts = 0
     }
@@ -4784,7 +5206,7 @@ local SpellFlow = (function()
         letter
     )
         if flow.KeyBusy[key] then
-            return
+            return false
         end
 
         flow.KeyBusy[key] = true
@@ -4827,82 +5249,173 @@ local SpellFlow = (function()
 
             flow.KeyBusy[key] = nil
         end)
+
+        return true
+    end
+
+    local function keyData(letter)
+        if letter == "Q" then
+            return Enum.KeyCode.Q, 0x51
+        end
+
+        return Enum.KeyCode.E, 0x45
+    end
+
+    local function pressPaired(
+        firstLetter,
+        secondLetter
+    )
+        local firstKey, firstFallback =
+            keyData(firstLetter)
+        local secondKey, secondFallback =
+            keyData(secondLetter)
+
+        if flow.PairBusy
+            or flow.KeyBusy[firstKey]
+            or flow.KeyBusy[secondKey] then
+
+            return false
+        end
+
+        flow.PairBusy = true
+        flow.PairToken = flow.PairToken + 1
+        flow.PairOrder =
+            firstLetter .. ">" .. secondLetter
+
+        local token = flow.PairToken
+
+        task.spawn(function()
+            local accepted =
+                pressKey(
+                    firstKey,
+                    firstFallback,
+                    firstLetter
+                )
+
+            if not accepted then
+                if token == flow.PairToken then
+                    flow.PairBusy = false
+                end
+                return
+            end
+
+            local startedDeadline =
+                os.clock()
+                + PAIR_CAST_START_TIMEOUT
+            local busyObserved = false
+            local cooldownObservedAt = nil
+
+            while State.Alive
+                and token == flow.PairToken
+                and os.clock()
+                    < startedDeadline do
+
+                local ready, detected =
+                    currentAbilityReady(
+                        firstLetter
+                    )
+
+                if characterBusyCasting() then
+                    busyObserved = true
+                    break
+                end
+
+                if detected
+                    and not ready
+                    and not cooldownObservedAt then
+
+                    cooldownObservedAt =
+                        os.clock()
+                end
+
+                if cooldownObservedAt
+                    and os.clock()
+                        - cooldownObservedAt
+                        >= 0.12 then
+
+                    break
+                end
+
+                task.wait(PAIR_CAST_POLL)
+            end
+
+            if not State.Alive
+                or token ~= flow.PairToken then
+
+                return
+            end
+
+            if not busyObserved
+                and not cooldownObservedAt then
+
+                task.wait(
+                    PAIR_CAST_FALLBACK_GAP
+                )
+            end
+
+            local clearDeadline =
+                os.clock()
+                + PAIR_CAST_CLEAR_TIMEOUT
+
+            while State.Alive
+                and token == flow.PairToken
+                and characterBusyCasting()
+                and os.clock()
+                    < clearDeadline do
+
+                task.wait(PAIR_CAST_POLL)
+            end
+
+            if State.Alive
+                and token == flow.PairToken then
+
+                pressKey(
+                    secondKey,
+                    secondFallback,
+                    secondLetter
+                )
+
+                task.wait(0.10)
+            end
+
+            if token == flow.PairToken then
+                flow.PairBusy = false
+            end
+        end)
+
+        return true
+    end
+
+    local function preferredPairOrder()
+        local qBuff =
+            currentAbilityKind("Q")
+                == "BUFF"
+        local eBuff =
+            currentAbilityKind("E")
+                == "BUFF"
+
+        if eBuff and not qBuff then
+            return "E", "Q"
+        end
+
+        return "Q", "E"
+    end
+
+    local function pressBoth()
+        local first, second =
+            preferredPairOrder()
+
+        return pressPaired(
+            first,
+            second
+        )
     end
 
     local function cooldownState(letter)
-        local playerGui = LP:FindFirstChildOfClass(
-            "PlayerGui"
-        )
+        local ready, detected =
+            currentAbilityReady(letter)
 
-        if not playerGui then
-            return false, false
-        end
-
-        local keyLabel = nil
-
-        for _, object in ipairs(
-            playerGui:GetDescendants()
-        ) do
-            if (
-                object:IsA("TextLabel")
-                or object:IsA("TextButton")
-            ) then
-                local textValue =
-                    string.upper(
-                        tostring(object.Text or "")
-                    ):gsub("%s+", "")
-
-                if textValue == letter then
-                    keyLabel = object
-                    break
-                end
-            end
-        end
-
-        if not keyLabel then
-            return false, false
-        end
-
-        local container = keyLabel.Parent
-
-        for _ = 1, 3 do
-            if not container
-                or container == playerGui then
-
-                break
-            end
-
-            for _, object in ipairs(
-                container:GetDescendants()
-            ) do
-                if object ~= keyLabel
-                    and (
-                        object:IsA("TextLabel")
-                        or object:IsA("TextButton")
-                    )
-                    and object.Visible then
-
-                    local numberText =
-                        tostring(
-                            object.Text or ""
-                        ):match(
-                            "^%s*(%d+%.?%d*)%s*$"
-                        )
-
-                    local seconds =
-                        numberText
-                        and tonumber(numberText)
-
-                    if seconds then
-                        return seconds > 0.05, true
-                    end
-                end
-            end
-
-            container = container.Parent
-        end
-
-        return false, true
+        return not ready, detected
     end
 
     local function spellReady(
@@ -4924,7 +5437,9 @@ local SpellFlow = (function()
         end
 
         return now - castAt
-            >= SPELL_FALLBACK_COOLDOWN
+            >= currentCooldownLength(
+                letter
+            )
     end
 
     function flow:Ready(now)
@@ -4970,8 +5485,13 @@ local SpellFlow = (function()
         self.LastE = -math.huge
         self.ClearedAt = 0
         self.KeyBusy = {}
+        self.PairToken = self.PairToken + 1
+        self.PairBusy = false
+        self.PairOrder = nil
         self.QAttempts = 0
         self.EAttempts = 0
+
+        refreshAbilityRuntime(true)
     end
 
     function flow:CastNow(letter)
@@ -5002,6 +5522,26 @@ local SpellFlow = (function()
                 "E"
             )
         end
+    end
+
+    function flow:CastBothNow()
+        local now = os.clock()
+
+        if not pressBoth() then
+            return false
+        end
+
+        self.LastQ = now
+        self.LastE = now
+        self.QAttempts =
+            self.QAttempts + 1
+        self.EAttempts =
+            self.EAttempts + 1
+
+        State.OwnAbilityIgnoreUntil =
+            now + OWN_BUFF_IGNORE_TIME
+
+        return true
     end
 
     function flow:Observe(target, now)
@@ -5060,6 +5600,13 @@ local SpellFlow = (function()
     end
 
     function flow:Status()
+        if self.PairBusy then
+            return "PAIR "
+                .. tostring(
+                    self.PairOrder or "Q>E"
+                )
+        end
+
         if State.SpamSpells then
             return "SPAM Q:"
                 .. tostring(self.QAttempts)
@@ -5102,17 +5649,20 @@ local SpellFlow = (function()
         mode,
         remoteCast
     )
-        local qRange =
-            remoteCast
-            and REMOTE_ABILITY_RANGE
-            or Q_ABILITY_RANGE
-
-        local eRange =
-            remoteCast
-            and REMOTE_ABILITY_RANGE
-            or E_ABILITY_RANGE
-
+        local qRange,
+            eRange,
+            qBuff,
+            eBuff =
+                pairedAbilityRanges()
         local now = os.clock()
+        local qAbilityReady =
+            currentAbilityReady("Q")
+        local eAbilityReady =
+            currentAbilityReady("E")
+        local buffPair =
+            AUTO_Q
+            and AUTO_E
+            and (qBuff or eBuff)
 
         if State.SpamSpells
             or State.TargetIsBoss then
@@ -5121,39 +5671,84 @@ local SpellFlow = (function()
                 return
             end
 
-            if AUTO_Q
+            local qReady =
+                AUTO_Q
+                and qAbilityReady
+                and not self.PairBusy
                 and distance <= qRange
                 and now - self.LastQ
-                    >= SPELL_SPAM_INTERVAL then
+                    >= SPELL_SPAM_INTERVAL
 
-                self.LastQ = now
-                self.QAttempts =
-                    self.QAttempts + 1
-
-                State.OwnAbilityIgnoreUntil =
-                    now + OWN_BUFF_IGNORE_TIME
-
-                pressKey(
-                    Enum.KeyCode.Q,
-                    0x51,
-                    "Q"
-                )
-            end
-
-            if AUTO_E
+            local eReady =
+                AUTO_E
+                and eAbilityReady
+                and not self.PairBusy
                 and distance <= eRange
                 and now - self.LastE
-                    >= SPELL_SPAM_INTERVAL then
+                    >= SPELL_SPAM_INTERVAL
 
-                self.LastE = now
-                self.EAttempts =
-                    self.EAttempts + 1
+            if buffPair then
+                if qReady
+                    and eReady
+                    and pressBoth() then
 
-                pressKey(
-                    Enum.KeyCode.E,
-                    0x45,
-                    "E"
-                )
+                    self.LastQ = now
+                    self.LastE = now
+                    self.QAttempts =
+                        self.QAttempts + 1
+                    self.EAttempts =
+                        self.EAttempts + 1
+
+                    State.OwnAbilityIgnoreUntil =
+                        now
+                        + OWN_BUFF_IGNORE_TIME
+                end
+
+                return
+            end
+
+            if qReady and eReady then
+                if pressBoth() then
+                    self.LastQ = now
+                    self.LastE = now
+                    self.QAttempts =
+                        self.QAttempts + 1
+                    self.EAttempts =
+                        self.EAttempts + 1
+
+                    State.OwnAbilityIgnoreUntil =
+                        now
+                        + OWN_BUFF_IGNORE_TIME
+                end
+
+            else
+                if qReady then
+                    if pressKey(
+                        Enum.KeyCode.Q,
+                        0x51,
+                        "Q"
+                    ) then
+                        self.LastQ = now
+                        self.QAttempts =
+                            self.QAttempts + 1
+
+                        State.OwnAbilityIgnoreUntil =
+                            now
+                            + OWN_BUFF_IGNORE_TIME
+                    end
+                end
+
+                if eReady then
+                    if pressKey(
+                        Enum.KeyCode.E,
+                        0x45,
+                        "E"
+                    ) then
+                        self.LastE = now
+                        self.EAttempts =
+                            self.EAttempts + 1
+                    end
+                end
             end
 
             return
@@ -5176,39 +5771,84 @@ local SpellFlow = (function()
             return
         end
 
-        if AUTO_Q
+        local qReady =
+            AUTO_Q
+            and qAbilityReady
+            and not self.PairBusy
             and not self.QUsed
-            and distance <= qRange then
+            and distance <= qRange
 
-            self.QUsed = true
-            self.LastQ = now
-            self.QAttempts =
-                self.QAttempts + 1
+        local eReady =
+            AUTO_E
+            and eAbilityReady
+            and not self.PairBusy
+            and not self.EUsed
+            and distance <= eRange
 
-            State.OwnAbilityIgnoreUntil =
-                now + OWN_BUFF_IGNORE_TIME
+        if buffPair then
+            if qReady
+                and eReady
+                and pressBoth() then
 
-            pressKey(
+                self.QUsed = true
+                self.EUsed = true
+                self.LastQ = now
+                self.LastE = now
+                self.QAttempts =
+                    self.QAttempts + 1
+                self.EAttempts =
+                    self.EAttempts + 1
+
+                State.OwnAbilityIgnoreUntil =
+                    now
+                    + OWN_BUFF_IGNORE_TIME
+            end
+
+            return
+        end
+
+        if qReady and eReady then
+            if pressBoth() then
+                self.QUsed = true
+                self.EUsed = true
+                self.LastQ = now
+                self.LastE = now
+                self.QAttempts =
+                    self.QAttempts + 1
+                self.EAttempts =
+                    self.EAttempts + 1
+
+                State.OwnAbilityIgnoreUntil =
+                    now
+                    + OWN_BUFF_IGNORE_TIME
+            end
+
+        elseif qReady then
+            if pressKey(
                 Enum.KeyCode.Q,
                 0x51,
                 "Q"
-            )
-        end
+            ) then
+                self.QUsed = true
+                self.LastQ = now
+                self.QAttempts =
+                    self.QAttempts + 1
 
-        if AUTO_E
-            and not self.EUsed
-            and distance <= eRange then
-
-            self.EUsed = true
-            self.LastE = now
-            self.EAttempts =
-                self.EAttempts + 1
-
-            pressKey(
+                State.OwnAbilityIgnoreUntil =
+                    now
+                    + OWN_BUFF_IGNORE_TIME
+            end
+        elseif eReady then
+            if pressKey(
                 Enum.KeyCode.E,
                 0x45,
                 "E"
-            )
+            ) then
+                self.EUsed = true
+                self.LastE = now
+                self.EAttempts =
+                    self.EAttempts + 1
+            end
         end
     end
 
@@ -5474,6 +6114,9 @@ local function updateRemoteCastMode(
     distance,
     now
 )
+    local castRange =
+        maximumOffensiveRange()
+
     if target ~= RemoteCastTarget then
         RemoteCastTarget = target
         RemoteCastMode = false
@@ -5483,8 +6126,8 @@ local function updateRemoteCastMode(
     end
 
     if not validEnemy(target)
-        or distance <= E_ABILITY_RANGE - 4
-        or distance > REMOTE_ABILITY_RANGE then
+        or distance <= castRange - 4
+        or distance > castRange + 4 then
 
         RemoteCastMode = false
 
@@ -7188,7 +7831,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.9",
+                    Version = "V7.12",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -7263,8 +7906,9 @@ local function createInterface()
             })
 
             combatControls:Toggle({
-                Title = "Auto Q — Inner Focus",
-                Desc = "Automatically cast Inner Focus near enemies",
+                Title = "Auto Q — "
+                    .. currentAbilityName("Q"),
+                Desc = "Automatically cast the equipped Q ability",
                 Value = AUTO_Q,
                 Flag = "DQAutoQ",
                 Callback = function(value)
@@ -7273,8 +7917,9 @@ local function createInterface()
             })
 
             combatControls:Toggle({
-                Title = "Auto E — Geyser",
-                Desc = "Automatically cast Geyser near enemies",
+                Title = "Auto E — "
+                    .. currentAbilityName("E"),
+                Desc = "Automatically cast the equipped E ability",
                 Value = AUTO_E,
                 Flag = "DQAutoE",
                 Callback = function(value)
@@ -7284,7 +7929,7 @@ local function createInterface()
 
             combatControls:Toggle({
                 Title = "Spam Spells",
-                Desc = "Use Q/E repeatedly near enemies; skip pack waiting",
+                Desc = "Repeat Q/E near enemies; buffs always cast first",
                 Value = State.SpamSpells,
                 Flag = "DQSpamSpells",
                 Callback = function(value)
@@ -7294,8 +7939,17 @@ local function createInterface()
             })
 
             combatControls:Button({
+                Title = "Cast Q + E now",
+                Desc = "Buff first, then second power after casting unlocks",
+                Icon = "sparkles",
+                Callback = function()
+                    SpellFlow:CastBothNow()
+                end
+            })
+
+            combatControls:Button({
                 Title = "Cast Q now",
-                Desc = "Test Inner Focus input immediately",
+                Desc = "Test the equipped Q input immediately",
                 Icon = "zap",
                 Callback = function()
                     SpellFlow:CastNow("Q")
@@ -7304,7 +7958,7 @@ local function createInterface()
 
             combatControls:Button({
                 Title = "Cast E now",
-                Desc = "Test Geyser input immediately",
+                Desc = "Test the equipped E input immediately",
                 Icon = "waves",
                 Callback = function()
                     SpellFlow:CastNow("E")
@@ -7642,7 +8296,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.9",
+                "Combat Pilot V7.12",
                 "Footagesus WindUI loaded with the Xyneria theme.",
                 "check",
                 2
@@ -7660,5 +8314,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.9 loaded"
+    "Dungeon Quest Combat Pilot V7.12 loaded"
 )

@@ -46,9 +46,9 @@ local DODGE_SPEED = 20
 local PATH_SPEED = 20
 local NEXT_ROOM_SPEED = 20
 
-local DESIRED_DISTANCE = 18
-local FORCE_SPACE_ENTER = 14
-local FORCE_SPACE_EXIT = 17
+local DESIRED_DISTANCE = 36
+local FORCE_SPACE_ENTER = 34
+local FORCE_SPACE_EXIT = 35
 
 local MOB_CLUSTER_RADIUS = 24
 local MOB_CLUSTER_STICK_RADIUS = 13
@@ -92,6 +92,11 @@ local DUNGEON_PROFILE_BASE_URL =
 --------------------------------------------------
 
 local CFG = {
+    MIN_ENEMY_DISTANCE = 36,
+    ENEMY_DEATH_DISTANCE_STEP = 4,
+    ENEMY_DEATH_DISTANCE_MAX = 16,
+    ENEMY_CAST_RANGE_BUFFER = 1,
+    COMBAT_DEATH_STREAK_WINDOW = 180,
     BODY_RADIUS = 2.2,
     PREDICT_NEAR = 0.24,
     PREDICT_FAR = 0.55,
@@ -287,6 +292,13 @@ local State = {
     BossRangeSlot = "-",
     TargetIsBoss = false,
     TargetPriority = "NONE",
+    EnemySpacingBonus = 0,
+    EnemySpacingDistance = DESIRED_DISTANCE,
+    EnemySpacingEnter = FORCE_SPACE_ENTER,
+    EnemySpacingExit = FORCE_SPACE_EXIT,
+    EnemySpacingCastRange = 0,
+    CombatDeathStreak = 0,
+    LastCombatDeathAt = -math.huge,
     CloseThreatCount = 0,
     RouteGuidedTarget = false,
     OpenWallCount = 0,
@@ -750,18 +762,25 @@ local DungeonData = (function()
         local movement = profile.Movement or {}
 
         DESIRED_DISTANCE =
-            tonumber(movement.DesiredDistance)
-            or DESIRED_DISTANCE
+            math.max(
+                tonumber(movement.DesiredDistance)
+                    or DESIRED_DISTANCE,
+                CFG.MIN_ENEMY_DISTANCE
+            )
 
         FORCE_SPACE_ENTER =
-            tonumber(movement.ForceSpaceEnter)
-            or FORCE_SPACE_ENTER
+            math.max(
+                tonumber(movement.ForceSpaceEnter)
+                    or FORCE_SPACE_ENTER,
+                DESIRED_DISTANCE - 2
+            )
 
         FORCE_SPACE_EXIT =
             math.max(
                 tonumber(movement.ForceSpaceExit)
                     or FORCE_SPACE_EXIT,
-                FORCE_SPACE_ENTER + 1
+                FORCE_SPACE_ENTER + 1,
+                DESIRED_DISTANCE - 1
             )
 
         TARGET_LEASH_DISTANCE =
@@ -4262,6 +4281,10 @@ local function targetLeashDistance(enemy)
         return math.huge
     end
 
+    local desiredDistance =
+        State.EnemySpacingDistance
+        or DESIRED_DISTANCE
+
     local name =
         string.lower(
             enemy.Name or ""
@@ -4273,10 +4296,16 @@ local function targetLeashDistance(enemy)
         true
     ) then
 
-        return BOB_LEASH_DISTANCE
+        return math.max(
+            BOB_LEASH_DISTANCE,
+            desiredDistance + 5
+        )
     end
 
-    return TARGET_LEASH_DISTANCE
+    return math.max(
+        TARGET_LEASH_DISTANCE,
+        desiredDistance + 8
+    )
 end
 
 local function candidateDirections(
@@ -4960,7 +4989,10 @@ local function findEscape(
                                 score
                                 + math.abs(
                                     enemyDistance
-                                    - DESIRED_DISTANCE
+                                    - (
+                                        State.EnemySpacingDistance
+                                        or DESIRED_DISTANCE
+                                    )
                                 ) * 0.18
 
                         elseif enemyDistance
@@ -5894,6 +5926,105 @@ local function maximumOffensiveRange()
     end
 
     return maximum
+end
+
+function State:MaximumEquippedOffensiveRange()
+    local maximum = 0
+
+    for _, entry in ipairs({
+        {"Q", AUTO_Q, Q_ABILITY_RANGE},
+        {"E", AUTO_E, E_ABILITY_RANGE}
+    }) do
+        local letter = entry[1]
+        local enabled = entry[2]
+        local fallbackRange = entry[3]
+
+        if enabled then
+            local ability =
+                currentAbility(letter)
+
+            if not ability then
+                maximum =
+                    math.max(
+                        maximum,
+                        fallbackRange
+                    )
+            elseif ability.Kind == "ATTACK" then
+                maximum =
+                    math.max(
+                        maximum,
+                        ability.Range
+                            or fallbackRange
+                    )
+            end
+        end
+    end
+
+    return maximum
+end
+
+function State:CurrentEnemySpacingPlan()
+    local requestedDistance =
+        DESIRED_DISTANCE
+        + math.clamp(
+            self.EnemySpacingBonus or 0,
+            0,
+            CFG.ENEMY_DEATH_DISTANCE_MAX
+        )
+
+    local castRange =
+        self:MaximumEquippedOffensiveRange()
+
+    local desiredDistance =
+        requestedDistance
+
+    -- Stay inside a usable ranged spell when that spell can already
+    -- support the safe baseline. Short-range skills never drag the
+    -- character closer than the global minimum enemy distance.
+    if castRange > CFG.MIN_ENEMY_DISTANCE
+            + CFG.ENEMY_CAST_RANGE_BUFFER
+        and castRange < math.huge then
+
+        desiredDistance =
+            math.min(
+                requestedDistance,
+                castRange
+                    - CFG.ENEMY_CAST_RANGE_BUFFER
+            )
+    end
+
+    desiredDistance =
+        math.max(
+            desiredDistance,
+            CFG.MIN_ENEMY_DISTANCE
+        )
+
+    local appliedBonus =
+        desiredDistance - DESIRED_DISTANCE
+
+    local spacingEnter =
+        FORCE_SPACE_ENTER + appliedBonus
+
+    local spacingExit =
+        math.max(
+            FORCE_SPACE_EXIT + appliedBonus,
+            spacingEnter + 1
+        )
+
+    self.EnemySpacingDistance =
+        desiredDistance
+    self.EnemySpacingEnter =
+        spacingEnter
+    self.EnemySpacingExit =
+        spacingExit
+    self.EnemySpacingCastRange =
+        castRange
+
+    return
+        desiredDistance,
+        spacingEnter,
+        spacingExit,
+        desiredDistance + 4
 end
 
 function State:AbilityRangeStatus(letter)
@@ -7123,7 +7254,10 @@ local function updateRemoteCastMode(
         or distance > reliableCastLimit
         or distance
             <= math.max(
-                DESIRED_DISTANCE + 2,
+                (
+                    State.EnemySpacingDistance
+                    or DESIRED_DISTANCE
+                ) + 2,
                 plannedRange + 0.5
             ) then
 
@@ -7171,6 +7305,41 @@ end
 --------------------------------------------------
 
 local BoundCharacters = {}
+
+function State:RecordCombatDeath()
+    if Mode == "RESETTING" then
+        return
+    end
+
+    local now = os.clock()
+    local combatActive =
+        validEnemy(Target)
+        or self.TargetIsBoss
+        or now - LastThreatSeen <= 2
+
+    if not combatActive then
+        return
+    end
+
+    if now - (
+        self.LastCombatDeathAt
+        or -math.huge
+    ) <= CFG.COMBAT_DEATH_STREAK_WINDOW then
+
+        self.CombatDeathStreak =
+            (self.CombatDeathStreak or 0) + 1
+    else
+        self.CombatDeathStreak = 1
+    end
+
+    self.LastCombatDeathAt = now
+    self.EnemySpacingBonus =
+        math.min(
+            CFG.ENEMY_DEATH_DISTANCE_MAX,
+            self.CombatDeathStreak
+                * CFG.ENEMY_DEATH_DISTANCE_STEP
+        )
+end
 
 local function resetCombatCycle(nextMode)
     SpellFlow:Reset()
@@ -7273,6 +7442,7 @@ local function bindCharacterLifecycle(character)
             connect(
                 humanoid.Died,
                 function()
+                    State:RecordCombatDeath()
                     resetCombatCycle("DEAD")
                 end
             )
@@ -7991,8 +8161,11 @@ connect(
         -- Every target uses one shared enemy-spacing system. Boss
         -- identity still controls targeting and recasting, never the
         -- distance at which movement approaches or retreats.
-        local movementStopDistance =
-            DESIRED_DISTANCE + 4
+        local desiredEnemyDistance,
+            spacingEnter,
+            spacingExit,
+            movementStopDistance =
+                State:CurrentEnemySpacingPlan()
 
         local needsApproach =
             TargetDistance
@@ -8209,9 +8382,9 @@ connect(
             BlockedSince = nil
         end
 
-        if TargetDistance < FORCE_SPACE_ENTER then
+        if TargetDistance < spacingEnter then
             State.SpacingActive = true
-        elseif TargetDistance >= FORCE_SPACE_EXIT then
+        elseif TargetDistance >= spacingExit then
             State.SpacingActive = false
         end
 
@@ -8249,7 +8422,7 @@ connect(
         --------------------------------------------------
 
         elseif TargetDistance
-            > DESIRED_DISTANCE + 4 then
+            > movementStopDistance then
 
             Mode =
                 State.RouteGuidedTarget
@@ -8287,7 +8460,7 @@ connect(
                 math.clamp(
                     (
                         TargetDistance
-                        - DESIRED_DISTANCE
+                        - desiredEnemyDistance
                     ) / 7,
 
                     -0.35,
@@ -9140,7 +9313,7 @@ local function createInterface()
 
             combatTab:Paragraph({
                 Title = "Forced enemy spacing",
-                Desc = "Every mob and boss uses the same retreat, release, chase and orbit distances.",
+                Desc = "All mobs and bosses use a 36-stud baseline; repeated combat deaths add 4 studs up to the equipped attack's usable range.",
                 Icon = "move-horizontal"
             })
 
@@ -9485,22 +9658,39 @@ local function createInterface()
                         .. State:AbilityRangeStatus("Q")
                         .. " | "
                         .. State:AbilityRangeStatus("E")
-                        .. "\nBoss cast plan: "
+                        .. "\nEnemy spacing: "
                         .. string.format(
                             "%.1f",
-                            State.BossEngagementRange
+                            State.EnemySpacingDistance
                                 or DESIRED_DISTANCE
                         )
-                        .. " ["
-                        .. tostring(
-                            State.BossRangeMode
-                                or "FALLBACK"
+                        .. " | Retreat<"
+                        .. string.format(
+                            "%.1f",
+                            State.EnemySpacingEnter
+                                or FORCE_SPACE_ENTER
                         )
-                        .. ":"
+                        .. " | Death bonus:+"
                         .. tostring(
-                            State.BossRangeSlot or "-"
+                            State.EnemySpacingBonus or 0
                         )
-                        .. "]"
+                        .. " ("
+                        .. tostring(
+                            State.CombatDeathStreak or 0
+                        )
+                        .. ")"
+                        .. "\nUsable attack reach: "
+                        .. string.format(
+                            "%.1f",
+                            State.EnemySpacingCastRange
+                                or 0
+                        )
+                        .. " | Target:"
+                        .. tostring(
+                            State.TargetIsBoss
+                            and "BOSS"
+                            or "MOB"
+                        )
                         .. "\nNavigation: "
                         .. (
                             State.AdaptiveModel

@@ -1,5 +1,5 @@
---// Dungeon Quest Combat Pilot V7.16
---// Build: V7.16-BOSS-RANGE-MICRO-DODGE-20260905
+--// Dungeon Quest Combat Pilot V7.17
+--// Build: V7.17-PARTY-AIR-ROUTE-20260905
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Global enemyProjectiles hazard registry + safe/context exclusions
 --// PRECAST warning zones + strict no-contact live-hazard envelopes
@@ -9,6 +9,8 @@
 --// Close-chaser priority + route-guided distant targets
 --// Shared enemy spacing + optional live adaptive pathfinding
 --// Long-range boss cast/retreat cycle + boss-only death spacing
+--// Nearest-body mob spacing + party-safe far-target routing
+--// Physics air orbit in combat; normal walking between rooms
 --// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -48,9 +50,9 @@ local DODGE_SPEED = 20
 local PATH_SPEED = 20
 local NEXT_ROOM_SPEED = 20
 
-local DESIRED_DISTANCE = 36
-local FORCE_SPACE_ENTER = 34
-local FORCE_SPACE_EXIT = 35
+local DESIRED_DISTANCE = 48
+local FORCE_SPACE_ENTER = 46
+local FORCE_SPACE_EXIT = 47
 
 local MOB_CLUSTER_RADIUS = 24
 local MOB_CLUSTER_STICK_RADIUS = 13
@@ -64,8 +66,8 @@ local BOB_LEASH_DISTANCE = 26
 local LEASH_INWARD_START = 4
 local LEASH_MAX_INWARD = 0.72
 
-local Q_ABILITY_RANGE = 38
-local E_ABILITY_RANGE = 38
+local Q_ABILITY_RANGE = 40
+local E_ABILITY_RANGE = 40
 local TAUNT_ABILITY_RANGE = 22
 local REMOTE_PROGRESS_TIMEOUT = 1.35
 local REMOTE_PROGRESS_STEP = 2.0
@@ -94,11 +96,13 @@ local DUNGEON_PROFILE_BASE_URL =
 --------------------------------------------------
 
 local CFG = {
-    MIN_ENEMY_DISTANCE = 36,
+    MIN_ENEMY_DISTANCE = 39,
     ENEMY_DEATH_DISTANCE_STEP = 4,
     ENEMY_DEATH_DISTANCE_MAX = 16,
     ENEMY_CAST_RANGE_BUFFER = 1,
-    MOB_CAST_RANGE_CAP = 38,
+    MOB_CAST_RANGE_CAP = 48,
+    MOB_SPACING_ENTER_OFFSET = 2,
+    MOB_SPACING_EXIT_OFFSET = 1,
     BOSS_PREFERRED_DISTANCE = 60,
     BOSS_DEATH_DISTANCE_STEP = 8,
     BOSS_DEATH_DISTANCE_MAX = 24,
@@ -112,6 +116,12 @@ local CFG = {
     DODGE_MICRO_TELEPORT_COOLDOWN = 0.40,
     DODGE_MICRO_TELEPORT_MIN = 1.20,
     DODGE_MICRO_TELEPORTS_PER_THREAT = 1,
+    COMBAT_AIR_HEIGHT = 9,
+    COMBAT_AIR_RESPONSE = 18,
+    COMBAT_AIR_DAMPING = 7,
+    COMBAT_AIR_MAX_ACCEL = 85,
+    COMBAT_AIR_CEILING_CLEARANCE = 3.2,
+    COMBAT_AIR_SAMPLE_INTERVAL = 0.10,
     COMBAT_DEATH_STREAK_WINDOW = 180,
     BODY_RADIUS = 2.2,
     PREDICT_NEAR = 0.24,
@@ -121,6 +131,7 @@ local CFG = {
     TARGET_UPDATE_INTERVAL = 0.075,
     HAZARD_UPDATE_INTERVAL = 1 / 30,
     ENEMY_FALLBACK_INTERVAL = 1.00,
+    PARTY_IGNORE_REFRESH = 0.35,
     SPELL_DECISION_INTERVAL = 0.05,
     CLOSE_DANGER_DISTANCE = 15,
     CHASER_PRIORITY_DISTANCE = 28,
@@ -225,6 +236,10 @@ local function stopOld(name)
     if old.RestoreWalls then
         pcall(old.RestoreWalls, old)
     end
+
+    if old.DestroyCombatHover then
+        pcall(old.DestroyCombatHover, old)
+    end
 end
 
 local oldStates = {
@@ -254,7 +269,8 @@ local oldStates = {
     "DQ_COMBAT_V713",
     "DQ_COMBAT_V714",
     "DQ_COMBAT_V715",
-    "DQ_COMBAT_V716"
+    "DQ_COMBAT_V716",
+    "DQ_COMBAT_V717"
 }
 
 for _, name in ipairs(oldStates) do
@@ -284,7 +300,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V713_RENDER",
     "DQ_COMBAT_V714_RENDER",
     "DQ_COMBAT_V715_RENDER",
-    "DQ_COMBAT_V716_RENDER"
+    "DQ_COMBAT_V716_RENDER",
+    "DQ_COMBAT_V717_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -296,12 +313,20 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V716_RENDER",
+    RenderName = "DQ_COMBAT_V717_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
     WallNoclip = true,
     MicroDodgeTeleport = true,
+    AirCombatOrbit = true,
+    CombatAirborne = false,
+    CombatHoverTargetY = nil,
+    CombatHoverGroundY = nil,
+    LastCombatHoverSample = -math.huge,
+    CombatHoverRoot = nil,
+    CombatHoverAttachment = nil,
+    CombatHoverForce = nil,
     AdaptiveBossRange = true,
     AdaptiveModel = false,
     AdaptivePathActive = false,
@@ -311,6 +336,8 @@ local State = {
     BossRangeSlot = "-",
     TargetIsBoss = false,
     TargetPriority = "NONE",
+    NearestEnemy = nil,
+    NearestEnemyDistance = math.huge,
     EnemySpacingBonus = 0,
     EnemySpacingDistance = DESIRED_DISTANCE,
     EnemySpacingEnter = FORCE_SPACE_ENTER,
@@ -337,6 +364,11 @@ local State = {
     LastDodgeMicroTeleportAt = -math.huge,
     CloseThreatCount = 0,
     RouteGuidedTarget = false,
+    FarTargetRouting = false,
+    RouteNavigationMode = "LOCAL",
+    PlayerCharacterIgnore = {},
+    LastPlayerIgnoreRefresh = -math.huge,
+    PartyMemberCount = 0,
     OpenWallCount = 0,
     OpenWallParts = setmetatable({}, {__mode = "k"}),
     BossIdentityCache = setmetatable({}, {__mode = "k"}),
@@ -349,7 +381,7 @@ local State = {
     LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V716 = State
+ENV.DQ_COMBAT_V717 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -376,6 +408,7 @@ pcall(function()
         "DQCombatV714",
         "DQCombatV715",
         "DQCombatV716",
+        "DQCombatV717",
         "XyneriaUI",
         "WindUI"
     }
@@ -442,17 +475,51 @@ local function getCharacter()
     return character, root, humanoid
 end
 
-local function isPlayerObject(object)
-    for _, player in ipairs(
-        Players:GetPlayers()
-    ) do
-        local character =
-            player.Character
+function State:PlayerCharactersForNavigation(force)
+    local now = os.clock()
 
-        if character
-            and object:IsDescendantOf(
-                character
-            ) then
+    if not force
+        and now - self.LastPlayerIgnoreRefresh
+            < CFG.PARTY_IGNORE_REFRESH then
+
+        return self.PlayerCharacterIgnore
+    end
+
+    local characters = {}
+    local partyCount = 0
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        local playerCharacter = player.Character
+
+        if playerCharacter
+            and playerCharacter.Parent then
+
+            table.insert(characters, playerCharacter)
+
+            if player ~= LP then
+                partyCount = partyCount + 1
+            end
+        end
+    end
+
+    self.PlayerCharacterIgnore = characters
+    self.LastPlayerIgnoreRefresh = now
+    self.PartyMemberCount = partyCount
+
+    return characters
+end
+
+local function isPlayerObject(object)
+    if not object then
+        return false
+    end
+
+    for _, playerCharacter in ipairs(
+        State:PlayerCharactersForNavigation(false)
+    ) do
+        if object:IsDescendantOf(
+            playerCharacter
+        ) then
 
             return true
         end
@@ -802,6 +869,7 @@ local DungeonData = (function()
             math.max(
                 tonumber(movement.DesiredDistance)
                     or DESIRED_DISTANCE,
+                DESIRED_DISTANCE,
                 CFG.MIN_ENEMY_DISTANCE
             )
 
@@ -809,6 +877,7 @@ local DungeonData = (function()
             math.max(
                 tonumber(movement.ForceSpaceEnter)
                     or FORCE_SPACE_ENTER,
+                FORCE_SPACE_ENTER,
                 DESIRED_DISTANCE - 2
             )
 
@@ -816,6 +885,7 @@ local DungeonData = (function()
             math.max(
                 tonumber(movement.ForceSpaceExit)
                     or FORCE_SPACE_EXIT,
+                FORCE_SPACE_EXIT,
                 FORCE_SPACE_ENTER + 1,
                 DESIRED_DISTANCE - 1
             )
@@ -1384,6 +1454,14 @@ local function chooseTarget(
     position,
     currentTarget
 )
+    local closest,
+        closestDistance =
+            nearestEnemy(position)
+
+    State.NearestEnemy = closest
+    State.NearestEnemyDistance =
+        closestDistance or math.huge
+
     local dangerTarget,
         dangerDistance,
         dangerAim,
@@ -1398,10 +1476,6 @@ local function chooseTarget(
             dangerAim,
             dangerCount
     end
-
-    local closest,
-        closestDistance =
-            nearestEnemy(position)
 
     if not closest then
         State.TargetPriority = "NONE"
@@ -2422,7 +2496,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V716_Hazard"
+        "DQ_V717_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3585,6 +3659,25 @@ local function rayParams(character)
         character
     }
 
+    -- Other players are dynamic actors, not dungeon walls or valid
+    -- ground. Ignoring them prevents party members from breaking
+    -- route visibility, wall steering, and micro-dodge validation.
+    for _, playerCharacter in ipairs(
+        State:PlayerCharactersForNavigation(false)
+    ) do
+        if playerCharacter ~= character then
+            table.insert(ignore, playerCharacter)
+        end
+    end
+
+    -- NPC bodies are moving actors as well.  They must not become
+    -- fake floors for combat hover or fake walls for route checks.
+    for enemyFolder in pairs(EnemyFolders) do
+        if enemyFolder.Parent then
+            table.insert(ignore, enemyFolder)
+        end
+    end
+
     for _, hazard in pairs(
         Hazards
     ) do
@@ -3638,6 +3731,199 @@ local function groundAt(
         result.Position.Y + 3,
         position.Z
     )
+end
+
+--------------------------------------------------
+-- PHYSICS COMBAT HOVER
+-- Horizontal travel still comes from Humanoid:Move. This applies
+-- vertical force only, so room travel remains ordinary walking and
+-- no TweenService movement is used.
+--------------------------------------------------
+
+function State:DestroyCombatHover()
+    if self.CombatHoverForce then
+        pcall(function()
+            self.CombatHoverForce:Destroy()
+        end)
+    end
+
+    if self.CombatHoverAttachment then
+        pcall(function()
+            self.CombatHoverAttachment:Destroy()
+        end)
+    end
+
+    self.CombatHoverRoot = nil
+    self.CombatHoverAttachment = nil
+    self.CombatHoverForce = nil
+    self.CombatHoverTargetY = nil
+    self.CombatHoverGroundY = nil
+    self.LastCombatHoverSample = -math.huge
+    self.CombatAirborne = false
+end
+
+function State:EnsureCombatHover(root)
+    if self.CombatHoverRoot == root
+        and self.CombatHoverAttachment
+        and self.CombatHoverAttachment.Parent
+        and self.CombatHoverForce
+        and self.CombatHoverForce.Parent then
+
+        return true
+    end
+
+    self:DestroyCombatHover()
+
+    local attachment =
+        Instance.new("Attachment")
+    attachment.Name =
+        "DQ_V717_CombatHoverAttachment"
+    attachment.Parent = root
+
+    local force =
+        Instance.new("VectorForce")
+    force.Name = "DQ_V717_CombatHoverForce"
+    force.Attachment0 = attachment
+    force.ApplyAtCenterOfMass = true
+    force.RelativeTo =
+        Enum.ActuatorRelativeTo.World
+    force.Force = Vector3.zero
+    force.Parent = root
+
+    self.CombatHoverRoot = root
+    self.CombatHoverAttachment = attachment
+    self.CombatHoverForce = force
+
+    return true
+end
+
+function State:UpdateCombatHover(
+    character,
+    root,
+    humanoid,
+    target
+)
+    local shouldHover =
+        self.AirCombatOrbit
+        and ENABLED
+        and validEnemy(target)
+        and not self.FarTargetRouting
+        and not self.RouteGuidedTarget
+        and not self.AdaptivePathActive
+
+    if not shouldHover then
+        if self.CombatHoverForce
+            and self.CombatHoverForce.Parent then
+
+            self.CombatHoverForce.Force =
+                Vector3.zero
+        end
+
+        self.CombatHoverTargetY = nil
+        self.CombatHoverGroundY = nil
+        self.LastCombatHoverSample = -math.huge
+        self.CombatAirborne = false
+        return
+    end
+
+    if not self:EnsureCombatHover(root) then
+        self.CombatAirborne = false
+        return
+    end
+
+    local now = os.clock()
+    local targetY = self.CombatHoverTargetY
+    local groundY = self.CombatHoverGroundY
+
+    if not targetY
+        or not groundY
+        or now - self.LastCombatHoverSample
+            >= CFG.COMBAT_AIR_SAMPLE_INTERVAL then
+
+        local ground =
+            groundAt(root.Position, character)
+
+        if not ground then
+            self.CombatHoverForce.Force =
+                Vector3.zero
+            self.CombatAirborne = false
+            return
+        end
+
+        groundY = ground.Y
+        targetY =
+            groundY + CFG.COMBAT_AIR_HEIGHT
+
+        local rise = targetY - root.Position.Y
+
+        if rise > 0 then
+            local ceiling =
+                Workspace:Raycast(
+                    root.Position,
+                    Vector3.new(
+                        0,
+                        rise
+                            + CFG.COMBAT_AIR_CEILING_CLEARANCE,
+                        0
+                    ),
+                    rayParams(character)
+                )
+
+            if ceiling
+                and ceiling.Instance
+                and ceiling.Instance:IsA("BasePart")
+                and ceiling.Instance.CanCollide then
+
+                targetY =
+                    math.min(
+                        targetY,
+                        ceiling.Position.Y
+                            - CFG.COMBAT_AIR_CEILING_CLEARANCE
+                    )
+            end
+        end
+
+        self.CombatHoverTargetY = targetY
+        self.CombatHoverGroundY = groundY
+        self.LastCombatHoverSample = now
+    end
+
+    if targetY <= groundY + 1 then
+        self.CombatHoverForce.Force =
+            Vector3.zero
+        self.CombatHoverTargetY = nil
+        self.CombatHoverGroundY = nil
+        self.CombatAirborne = false
+        return
+    end
+
+    local verticalVelocity =
+        root.AssemblyLinearVelocity.Y
+    local errorY =
+        targetY - root.Position.Y
+    local acceleration =
+        math.clamp(
+            errorY * CFG.COMBAT_AIR_RESPONSE
+                - verticalVelocity
+                    * CFG.COMBAT_AIR_DAMPING,
+            -CFG.COMBAT_AIR_MAX_ACCEL,
+            CFG.COMBAT_AIR_MAX_ACCEL
+        )
+    local mass =
+        math.max(root.AssemblyMass, 1)
+
+    self.CombatHoverForce.Force =
+        Vector3.new(
+            0,
+            mass
+                * (
+                    Workspace.Gravity
+                    + acceleration
+                ),
+            0
+        )
+    self.CombatHoverTargetY = targetY
+    self.CombatAirborne = true
 end
 
 --------------------------------------------------
@@ -4455,11 +4741,36 @@ local function candidateDirections(
                     * leashPressure
                     * LEASH_MAX_INWARD
 
+                -- A dodge remains primarily LEFT / RIGHT, but it
+                -- may not preserve a dangerous body-distance.  Add
+                -- a bounded outward component whenever the nearest
+                -- physical enemy is already inside the safe ring.
+                local minimumSpacing =
+                    State.EnemySpacingEnter
+                    or FORCE_SPACE_ENTER
+                local closePressure =
+                    math.clamp(
+                        (
+                            minimumSpacing
+                            - enemyDistance
+                        ) / 6,
+                        0,
+                        1
+                    )
+                local outwardCorrection =
+                    outward
+                    * closePressure
+                    * 0.60
+
                 local left =
-                    baseLeft + inward
+                    baseLeft
+                    + inward
+                    + outwardCorrection
 
                 local right =
-                    baseRight + inward
+                    baseRight
+                    + inward
+                    + outwardCorrection
 
                 local allowOutwardFallback =
                     enemyDistance
@@ -4726,16 +5037,38 @@ local function committedLateralFallback(
                     and -left
                     or left
 
+                local minimumSpacing =
+                    State.EnemySpacingEnter
+                    or FORCE_SPACE_ENTER
+                local closePressure =
+                    math.clamp(
+                        (
+                            minimumSpacing
+                            - enemyDistance
+                        ) / 6,
+                        0,
+                        1
+                    )
+                local outwardWeight =
+                    closePressure * 0.60
+
                 if threat
                     and threat.Expanding
                     and enemyDistance
                         < targetLeashDistance(enemy)
                             - 2 then
 
+                    outwardWeight =
+                        math.max(
+                            outwardWeight,
+                            CFG.EXPAND_OUTWARD_WEIGHT
+                        )
+                end
+
+                if outwardWeight > 0 then
                     direction =
                         direction
-                        - toward
-                            * CFG.EXPAND_OUTWARD_WEIGHT
+                        - toward * outwardWeight
                 end
 
                 local leash =
@@ -4894,6 +5227,22 @@ local function quickDodgeDirection(
                             enemy
                         )
 
+                    local minimumSpacing =
+                        State.EnemySpacingEnter
+                        or FORCE_SPACE_ENTER
+
+                    if enemyDistance
+                        < minimumSpacing then
+
+                        score =
+                            score
+                            - 12
+                            - (
+                                minimumSpacing
+                                - enemyDistance
+                            ) * 8
+                    end
+
                     if enemyDistance > leash then
                         score =
                             score
@@ -5025,6 +5374,22 @@ local function findEscape(
                                     enemyRoot.Position
                                 )
                             ).Magnitude
+
+                        local minimumSpacing =
+                            State.EnemySpacingEnter
+                            or FORCE_SPACE_ENTER
+
+                        if enemyDistance
+                            < minimumSpacing then
+
+                            score =
+                                score
+                                + 45
+                                + (
+                                    minimumSpacing
+                                    - enemyDistance
+                                ) * 6
+                        end
 
                         if enemyDistance < 8 then
                             score =
@@ -5225,10 +5590,15 @@ function State:TryMicroDodgeTeleport(
             candidate.Z - root.Position.Z
         )
 
+    local allowedGroundDifference =
+        self.CombatAirborne
+        and CFG.COMBAT_AIR_HEIGHT + 4
+        or 2.5
+
     if not grounded
         or math.abs(
             grounded.Y - root.Position.Y
-        ) > 2.5
+        ) > allowedGroundDifference
         or displacement.Magnitude
             > CFG.DODGE_MICRO_TELEPORT_DISTANCE
                 + 0.01 then
@@ -5428,7 +5798,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V716_FacingAttachment"
+        "DQ_V717_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -5439,7 +5809,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V716_Facing"
+        "DQ_V717_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -6290,7 +6660,7 @@ function State:CurrentEnemySpacingPlan()
     -- Stay inside a usable ranged spell when that spell can already
     -- support the safe baseline. Short-range skills never drag the
     -- character closer than the global minimum enemy distance.
-    if castRange > CFG.MIN_ENEMY_DISTANCE
+    if castRange >= CFG.MIN_ENEMY_DISTANCE
             + CFG.ENEMY_CAST_RANGE_BUFFER
         and castRange < math.huge then
 
@@ -6308,15 +6678,17 @@ function State:CurrentEnemySpacingPlan()
             CFG.MIN_ENEMY_DISTANCE
         )
 
-    local appliedBonus =
-        desiredDistance - DESIRED_DISTANCE
-
     local spacingEnter =
-        FORCE_SPACE_ENTER + appliedBonus
+        math.max(
+            desiredDistance
+                - CFG.MOB_SPACING_ENTER_OFFSET,
+            4
+        )
 
     local spacingExit =
         math.max(
-            FORCE_SPACE_EXIT + appliedBonus,
+            desiredDistance
+                - CFG.MOB_SPACING_EXIT_OFFSET,
             spacingEnter + 1
         )
 
@@ -6328,7 +6700,11 @@ function State:CurrentEnemySpacingPlan()
         spacingExit
     self.EnemySpacingCastRange =
         castRange
-    self.BossSpacingMode = "MOB"
+    self.BossSpacingMode =
+        desiredDistance
+            < requestedDistance - 0.5
+        and "MOB MAX RANGE"
+        or "MOB OUTER"
 
     return
         desiredDistance,
@@ -7098,7 +7474,7 @@ local SpellFlow = (function()
             and (qBuff or eBuff)
 
         -- Mobs use a deliberately shorter cast cap around their
-        -- 36-stud ring. Bosses use every stud of the detected spell
+        -- mob ring. Bosses use every stud of the detected spell
         -- reach, so long-range powers fire much earlier on bosses.
         if not State.TargetIsBoss then
             qRange =
@@ -7810,6 +8186,7 @@ end
 local function resetCombatCycle(nextMode)
     SpellFlow:Reset()
     State.ProfileRouteFlow:ResetForRespawn()
+    State:DestroyCombatHover()
 
     Target = nil
     TargetDistance = math.huge
@@ -7834,6 +8211,10 @@ local function resetCombatCycle(nextMode)
     State.TargetPriority = "NONE"
     State.CloseThreatCount = 0
     State.RouteGuidedTarget = false
+    State.FarTargetRouting = false
+    State.RouteNavigationMode = "RESPAWN"
+    State.NearestEnemy = nil
+    State.NearestEnemyDistance = math.huge
     State.AdaptivePathActive = false
     State.BossEngagementRange =
         math.max(
@@ -8000,10 +8381,34 @@ connect(
                 ).Magnitude
         end
 
+        local nearestPhysicalRoot =
+            validEnemy(State.NearestEnemy)
+            and State.NearestEnemy:FindFirstChild(
+                "HumanoidRootPart"
+            )
+            or nil
+
+        State.NearestEnemyDistance =
+            nearestPhysicalRoot
+            and (
+                flat(nearestPhysicalRoot.Position)
+                - flat(root.Position)
+            ).Magnitude
+            or math.huge
+
         State.TargetIsBoss =
             State:IsBossEnemy(Target)
 
         State:RefreshBossRangePlan()
+        State:CurrentEnemySpacingPlan()
+
+        -- Pack-centre targeting is useful for aiming AoE, but dodge
+        -- geometry must reference the body that can actually touch
+        -- the player first.
+        local dodgeEnemy =
+            validEnemy(State.NearestEnemy)
+            and State.NearestEnemy
+            or Target
 
         if Target then
             local order =
@@ -8118,7 +8523,7 @@ connect(
                 quickDodgeDirection(
                     character,
                     root,
-                    Target,
+                    dodgeEnemy,
                     threat
                 )
 
@@ -8203,7 +8608,7 @@ connect(
                     findEscape(
                         character,
                         root,
-                        Target,
+                        dodgeEnemy,
                         threat,
                         false
                     )
@@ -8245,7 +8650,7 @@ connect(
                 local fallback =
                     committedLateralFallback(
                         root,
-                        Target,
+                        dodgeEnemy,
                         threat
                     )
 
@@ -8291,7 +8696,7 @@ connect(
                     findEscape(
                         character,
                         root,
-                        Target,
+                        dodgeEnemy,
                         threat,
                         false
                     )
@@ -8352,7 +8757,7 @@ connect(
                 local fallback =
                     committedLateralFallback(
                         root,
-                        Target,
+                        dodgeEnemy,
                         threat
                     )
 
@@ -8415,7 +8820,7 @@ connect(
                     findEscape(
                         character,
                         root,
-                        Target,
+                        dodgeEnemy,
                         threat,
                         true
                     )
@@ -8441,11 +8846,11 @@ connect(
                     Mode = "EVADE CAST"
 
                     local fallback =
-                        committedLateralFallback(
-                            root,
-                            Target,
-                            threat
-                        )
+                    committedLateralFallback(
+                        root,
+                        dodgeEnemy,
+                        threat
+                    )
 
                     DesiredDirection =
                         fallback
@@ -8485,7 +8890,7 @@ connect(
             local fallback =
                 committedLateralFallback(
                     root,
-                    Target,
+                    dodgeEnemy,
                     threat
                 )
 
@@ -8552,6 +8957,8 @@ connect(
         if not Target then
             State.SpacingActive = false
             State.RouteGuidedTarget = false
+            State.FarTargetRouting = false
+            State.RouteNavigationMode = "NO TARGET"
             State.AdaptivePathActive = false
 
             fallbackEnemyScan()
@@ -8593,6 +9000,10 @@ connect(
             end
 
             if point then
+                State.RouteNavigationMode =
+                    routePoint
+                    and "RECORDED PROGRESS"
+                    or "ROOM FALLBACK"
                 Mode =
                     routePoint
                     and "ROUTE"
@@ -8707,33 +9118,66 @@ connect(
         local navigationPosition =
             combatNavigationPosition
 
-        -- Mobs retain the compact 36-stud orbit. Bosses use the
-        -- long-range cast/retreat cycle returned by the same movement
-        -- interface, so every dodge branch above still overrides it.
+        -- Aim may use the middle of a pack, but personal spacing must
+        -- use the nearest physical enemy. A cluster centre can look
+        -- safely distant while one member is touching the player.
         local desiredEnemyDistance,
             spacingEnter,
             spacingExit,
             movementStopDistance =
                 State:CurrentEnemySpacingPlan()
 
+        local nearestSpacingRoot =
+            validEnemy(State.NearestEnemy)
+            and State.NearestEnemy:FindFirstChild(
+                "HumanoidRootPart"
+            )
+            or nil
+        local spacingDistance = TargetDistance
+        local spacingThreatPosition =
+            combatNavigationPosition
+
+        if nearestSpacingRoot
+            and State.NearestEnemyDistance
+                < spacingDistance then
+
+            spacingDistance =
+                State.NearestEnemyDistance
+            spacingThreatPosition =
+                nearestSpacingRoot.Position
+        end
+
+        if spacingDistance < spacingEnter then
+            State.SpacingActive = true
+        elseif spacingDistance >= spacingExit then
+            State.SpacingActive = false
+        end
+
         local needsApproach =
-            TargetDistance
+            not State.SpacingActive
+            and TargetDistance
             > movementStopDistance + 0.5
-
-        State.RouteGuidedTarget = false
-        State.AdaptivePathActive = false
-
-        -- Distant enemies and bosses are approached along the
-        -- recorded dungeon spine. Combat and every dodge branch
-        -- above still have unrestricted local movement.
-        if not State.AdaptiveModel
-            and State.TargetPriority ~= "DANGER"
-            and needsApproach
+        local farTarget =
+            needsApproach
             and TargetDistance
                 > math.max(
                     CFG.ROUTE_TARGET_DISTANCE,
                     movementStopDistance + 8
-                ) then
+                )
+
+        State.RouteGuidedTarget = false
+        State.AdaptivePathActive = false
+        State.FarTargetRouting = farTarget
+        State.RouteNavigationMode =
+            farTarget
+            and "SEEKING ROUTE"
+            or "LOCAL"
+
+        -- Distant enemies and bosses are approached along the
+        -- recorded dungeon spine. Combat and every dodge branch
+        -- above still have unrestricted local movement.
+        if State.TargetPriority ~= "DANGER"
+            and farTarget then
 
             local routeApproach =
                 State.ProfileRouteFlow:
@@ -8755,6 +9199,8 @@ connect(
                 navigationPosition =
                     routeApproach.Position
                 State.RouteGuidedTarget = true
+                State.RouteNavigationMode =
+                    "RECORDED ROUTE"
 
                 if routeApproach.RoomOrder then
                     LastRoomOrder =
@@ -8766,13 +9212,15 @@ connect(
             end
         end
 
-        -- Adaptive Model ignores recorded route guidance and asks
-        -- Roblox pathfinding for a live route to the current enemy.
+        -- Recorded walk points take priority for distant targets even
+        -- when Adaptive Model is enabled. Live pathfinding is used
+        -- only when no recorded point is available.
         -- All threat/dodge branches have already run above, so they
         -- always override this path on the same heartbeat.
         if State.AdaptiveModel
             and State.TargetPriority ~= "DANGER"
-            and needsApproach then
+            and needsApproach
+            and not State.RouteGuidedTarget then
 
             local adaptiveDestination =
                 combatNavigationPosition
@@ -8811,6 +9259,10 @@ connect(
 
             if adaptiveDirection then
                 State.AdaptivePathActive = true
+                State.RouteNavigationMode =
+                    farTarget
+                    and "LIVE FAR PATH"
+                    or "ADAPTIVE PATH"
                 Mode =
                     State.TargetIsBoss
                     and "BOSS ADAPT"
@@ -8824,6 +9276,71 @@ connect(
                     )
                 return
             end
+        end
+
+        -- If the profile has no usable walk point, a distant target
+        -- still gets a real PathfindingService route. Never fall back
+        -- immediately to a straight line across walls or rooms.
+        if farTarget
+            and State.TargetPriority ~= "DANGER"
+            and not State.RouteGuidedTarget then
+
+            local pathChanged =
+                not PathDestination
+                or (
+                    flat(
+                        PathDestination
+                        - combatNavigationPosition
+                    )
+                ).Magnitude > 7
+
+            if pathChanged or not Waypoints then
+                buildPath(
+                    root.Position,
+                    combatNavigationPosition,
+                    false
+                )
+            end
+
+            if not State.AdaptiveModel
+                and stuckCheck(root) then
+                buildPath(
+                    root.Position,
+                    combatNavigationPosition,
+                    true
+                )
+            end
+
+            local farDirection =
+                pathDirection(
+                    root,
+                    humanoid
+                )
+
+            if farDirection then
+                State.AdaptivePathActive = true
+                State.RouteNavigationMode =
+                    "LIVE FAR PATH"
+                Mode =
+                    State.TargetIsBoss
+                    and "BOSS FAR PATH"
+                    or "FAR TARGET PATH"
+                DesiredSpeed = PATH_SPEED
+                DesiredDirection =
+                    wallSteer(
+                        farDirection,
+                        root,
+                        character
+                    )
+                return
+            end
+
+            State.RouteNavigationMode =
+                "FAR PATH RETRY"
+            Mode = "FAR PATH RETRY"
+            DesiredSpeed = 0
+            DesiredDirection = Vector3.zero
+            return
         end
 
         local toward =
@@ -8931,12 +9448,6 @@ connect(
             BlockedSince = nil
         end
 
-        if TargetDistance < spacingEnter then
-            State.SpacingActive = true
-        elseif TargetDistance >= spacingExit then
-            State.SpacingActive = false
-        end
-
         --------------------------------------------------
         -- FORCED PERSONAL SPACE WITH HYSTERESIS
         --------------------------------------------------
@@ -8949,8 +9460,15 @@ connect(
                 or "SPACE"
             DesiredSpeed = SPACE_SPEED
 
+            local nearestAway =
+                flat(
+                    spacingThreatPosition
+                    - root.Position
+                )
             local radial =
-                toward.Unit
+                nearestAway.Magnitude > 0.05
+                and nearestAway.Unit
+                or toward.Unit
 
             local tangent =
                 Vector3.new(
@@ -8977,10 +9495,14 @@ connect(
             > movementStopDistance then
 
             Mode =
-                State.TargetIsBoss
-                and "BOSS CAST APPROACH"
-                or State.RouteGuidedTarget
-                    and "TARGET ROUTE"
+                State.RouteGuidedTarget
+                and (
+                    State.TargetIsBoss
+                    and "BOSS ROUTE"
+                    or "TARGET ROUTE"
+                )
+                or State.TargetIsBoss
+                    and "BOSS CAST APPROACH"
                     or "CHASE"
             DesiredSpeed = CHASE_SPEED
 
@@ -9061,6 +9583,12 @@ RunService:BindToRenderStep(
         end
 
         State:MaintainWallNoclip(root)
+        State:UpdateCombatHover(
+            character,
+            root,
+            humanoid,
+            Target
+        )
 
         if not ENABLED then
             humanoid.AutoRotate = true
@@ -9693,7 +10221,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.16-BR",
+                    Version = "V7.17-PAR",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -9763,6 +10291,7 @@ local function createInterface()
                     if not ENABLED then
                         DesiredDirection =
                             Vector3.zero
+                        State:DestroyCombatHover()
                     end
                 end
             })
@@ -9797,6 +10326,21 @@ local function createInterface()
             })
 
             combatControls:Toggle({
+                Title = "Air Combat Orbit",
+                Desc = "Physics hover near enemies; room travel remains normal walking with no tweens",
+                Value = State.AirCombatOrbit,
+                Flag = "DQAirCombatOrbit",
+                Callback = function(value)
+                    State.AirCombatOrbit =
+                        value ~= false
+
+                    if not State.AirCombatOrbit then
+                        State:DestroyCombatHover()
+                    end
+                end
+            })
+
+            combatControls:Toggle({
                 Title = "Adaptive Boss Casting",
                 Desc = "Use detected spell reach for distant or blocked boss casts",
                 Value = State.AdaptiveBossRange,
@@ -9811,7 +10355,7 @@ local function createInterface()
 
             combatControls:Toggle({
                 Title = "Adaptive Model",
-                Desc = "Ignore recorded route guidance and live-pathfind toward enemies; dodging still overrides it",
+                Desc = "Use live pathfinding when a recorded far-target route is unavailable; dodging still overrides it",
                 Value = State.AdaptiveModel,
                 Flag = "DQAdaptiveModel",
                 Callback = function(value)
@@ -9884,7 +10428,7 @@ local function createInterface()
 
             combatTab:Paragraph({
                 Title = "Split mob / boss spacing",
-                Desc = "Mobs orbit at 36 studs. Bosses retreat to 60 studs and only approach when the furthest usable attack is ready; short ready spells cannot pull the player inward while the long-range spell cools. Boss deaths add 8 studs up to an 84-stud outer ring.",
+                Desc = "Mobs prefer 48 studs and use the nearest physical mob for the retreat check, never the misleading pack centre. A genuinely short attack uses its furthest reliable distance instead. Bosses start at 60 studs; boss deaths add 8 up to 84.",
                 Icon = "move-horizontal"
             })
 
@@ -10115,6 +10659,15 @@ local function createInterface()
                         )
                         or "-"
 
+                    local nearestDistanceText =
+                        State.NearestEnemyDistance
+                            < math.huge
+                        and string.format(
+                            "%.1f",
+                            State.NearestEnemyDistance
+                        )
+                        or "-"
+
                     local dangerNow =
                         ThreatCurrent
                         and string.format(
@@ -10147,6 +10700,8 @@ local function createInterface()
                         .. targetName
                         .. "\nDistance: "
                         .. distanceText
+                        .. " | Nearest physical:"
+                        .. nearestDistanceText
                         .. "\nFacing: "
                         .. (
                             FacingOkay
@@ -10205,6 +10760,15 @@ local function createInterface()
                             State.RouteGuidedTarget
                             and "ON"
                             or "OFF"
+                        )
+                        .. "\nRoute mode:"
+                        .. tostring(
+                            State.RouteNavigationMode
+                                or "LOCAL"
+                        )
+                        .. " | Party:"
+                        .. tostring(
+                            State.PartyMemberCount or 0
                         )
                         .. " | Stuck:"
                         .. tostring(StuckCount)
@@ -10296,6 +10860,12 @@ local function createInterface()
                             and "ON"
                             or "OFF"
                         )
+                        .. " | Air:"
+                        .. (
+                            State.CombatAirborne
+                            and "ON"
+                            or "OFF"
+                        )
                         .. "\nProfile: "
                         .. DungeonData.Name
                         .. "\nHazard DB: "
@@ -10333,7 +10903,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.16-BR",
+                "Combat Pilot V7.17-PAR",
                 DungeonData.HazardRegistryLoaded
                     and (
                         "Xyneria WindUI loaded with "
@@ -10364,5 +10934,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.16-BR loaded"
+    "Dungeon Quest Combat Pilot V7.17-PAR loaded"
 )

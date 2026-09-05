@@ -1,5 +1,5 @@
---// Dungeon Quest Combat Pilot V7.17
---// Build: V7.17-PARTY-AIR-ROUTE-20260905
+--// Dungeon Quest Combat Pilot V7.18
+--// Build: V7.18-TELEPORT-BOSS-RANGE-20260905
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Global enemyProjectiles hazard registry + safe/context exclusions
 --// PRECAST warning zones + strict no-contact live-hazard envelopes
@@ -10,7 +10,7 @@
 --// Shared enemy spacing + optional live adaptive pathfinding
 --// Long-range boss cast/retreat cycle + boss-only death spacing
 --// Nearest-body mob spacing + party-safe far-target routing
---// Physics air orbit in combat; normal walking between rooms
+--// Nearby verified teleport dodge; no flight and no tween movement
 --// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -103,7 +103,11 @@ local CFG = {
     MOB_CAST_RANGE_CAP = 48,
     MOB_SPACING_ENTER_OFFSET = 2,
     MOB_SPACING_EXIT_OFFSET = 1,
-    BOSS_PREFERRED_DISTANCE = 60,
+    BOSS_PREFERRED_DISTANCE = 70,
+    BOSS_MINIMUM_CAST_DISTANCE = 55,
+    BOSS_TARGET_RADIUS_CAP = 22,
+    BOSS_CAST_PROBE_EXTRA = 14,
+    BOSS_SPELL_SPAM_INTERVAL = 0.30,
     BOSS_DEATH_DISTANCE_STEP = 8,
     BOSS_DEATH_DISTANCE_MAX = 24,
     BOSS_CAST_RANGE_BUFFER = 1,
@@ -112,16 +116,10 @@ local CFG = {
     BOSS_CAST_ENTER_OFFSET = 2,
     BOSS_CAST_EXIT_OFFSET = 0.75,
     POST_DODGE_CAST_WINDOW = 0.45,
-    DODGE_MICRO_TELEPORT_DISTANCE = 3.0,
-    DODGE_MICRO_TELEPORT_COOLDOWN = 0.40,
-    DODGE_MICRO_TELEPORT_MIN = 1.20,
-    DODGE_MICRO_TELEPORTS_PER_THREAT = 1,
-    COMBAT_AIR_HEIGHT = 9,
-    COMBAT_AIR_RESPONSE = 18,
-    COMBAT_AIR_DAMPING = 7,
-    COMBAT_AIR_MAX_ACCEL = 85,
-    COMBAT_AIR_CEILING_CLEARANCE = 3.2,
-    COMBAT_AIR_SAMPLE_INTERVAL = 0.10,
+    DODGE_TELEPORT_DISTANCE = 7.0,
+    DODGE_TELEPORT_COOLDOWN = 0.40,
+    DODGE_TELEPORT_MIN = 1.20,
+    DODGE_TELEPORTS_PER_THREAT = 1,
     COMBAT_DEATH_STREAK_WINDOW = 180,
     BODY_RADIUS = 2.2,
     PREDICT_NEAR = 0.24,
@@ -270,7 +268,8 @@ local oldStates = {
     "DQ_COMBAT_V714",
     "DQ_COMBAT_V715",
     "DQ_COMBAT_V716",
-    "DQ_COMBAT_V717"
+    "DQ_COMBAT_V717",
+    "DQ_COMBAT_V718"
 }
 
 for _, name in ipairs(oldStates) do
@@ -301,7 +300,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V714_RENDER",
     "DQ_COMBAT_V715_RENDER",
     "DQ_COMBAT_V716_RENDER",
-    "DQ_COMBAT_V717_RENDER"
+    "DQ_COMBAT_V717_RENDER",
+    "DQ_COMBAT_V718_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -313,20 +313,12 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V717_RENDER",
+    RenderName = "DQ_COMBAT_V718_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
     WallNoclip = true,
-    MicroDodgeTeleport = true,
-    AirCombatOrbit = true,
-    CombatAirborne = false,
-    CombatHoverTargetY = nil,
-    CombatHoverGroundY = nil,
-    LastCombatHoverSample = -math.huge,
-    CombatHoverRoot = nil,
-    CombatHoverAttachment = nil,
-    CombatHoverForce = nil,
+    TeleportDodge = true,
     AdaptiveBossRange = true,
     AdaptiveModel = false,
     AdaptivePathActive = false,
@@ -335,6 +327,7 @@ local State = {
     BossRangeMode = "FALLBACK",
     BossRangeSlot = "-",
     TargetIsBoss = false,
+    TargetBodyRadius = 0,
     TargetPriority = "NONE",
     NearestEnemy = nil,
     NearestEnemyDistance = math.huge,
@@ -360,8 +353,8 @@ local State = {
     PostDodgeCastAttempts = 0,
     DodgeCastIssuedForThreat = false,
     DodgeTeleportsThisThreat = 0,
-    DodgeMicroTeleports = 0,
-    LastDodgeMicroTeleportAt = -math.huge,
+    DodgeTeleportCount = 0,
+    LastDodgeTeleportAt = -math.huge,
     CloseThreatCount = 0,
     RouteGuidedTarget = false,
     FarTargetRouting = false,
@@ -372,6 +365,7 @@ local State = {
     OpenWallCount = 0,
     OpenWallParts = setmetatable({}, {__mode = "k"}),
     BossIdentityCache = setmetatable({}, {__mode = "k"}),
+    EnemyRadiusCache = setmetatable({}, {__mode = "k"}),
     VisibleBossNames = {},
     LastVisibleBossScan = -math.huge,
     ProfileBossNames = {},
@@ -381,7 +375,7 @@ local State = {
     LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V717 = State
+ENV.DQ_COMBAT_V718 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -409,6 +403,7 @@ pcall(function()
         "DQCombatV715",
         "DQCombatV716",
         "DQCombatV717",
+        "DQCombatV718",
         "XyneriaUI",
         "WindUI"
     }
@@ -1073,6 +1068,67 @@ function State:IsBossEnemy(enemy)
     }
 
     return result
+end
+
+function State:EstimateEnemyHorizontalRadius(enemy)
+    if not validEnemy(enemy) then
+        return 0
+    end
+
+    local now = os.clock()
+    local cached = self.EnemyRadiusCache[enemy]
+
+    if cached
+        and now - cached.Time < 1.5 then
+
+        return cached.Radius
+    end
+
+    local radius = 0
+
+    pcall(function()
+        local _, size = enemy:GetBoundingBox()
+
+        radius =
+            math.max(size.X, size.Z) * 0.5
+    end)
+
+    radius = math.clamp(
+        radius,
+        0,
+        CFG.BOSS_TARGET_RADIUS_CAP
+    )
+
+    self.EnemyRadiusCache[enemy] = {
+        Radius = radius,
+        Time = now
+    }
+
+    return radius
+end
+
+function State:BossCastReachBonus()
+    return
+        math.clamp(
+            self.TargetBodyRadius or 0,
+            0,
+            CFG.BOSS_TARGET_RADIUS_CAP
+        )
+        + CFG.BOSS_CAST_PROBE_EXTRA
+end
+
+function State:BossEffectiveCastRange(range)
+    if range == math.huge then
+        return math.huge
+    end
+
+    range = tonumber(range) or 0
+
+    if range <= 0 then
+        return 0
+    end
+
+    return range + self:BossCastReachBonus()
 end
 
 local function registerEnemy(model)
@@ -2496,7 +2552,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V717_Hazard"
+        "DQ_V718_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3661,7 +3717,7 @@ local function rayParams(character)
 
     -- Other players are dynamic actors, not dungeon walls or valid
     -- ground. Ignoring them prevents party members from breaking
-    -- route visibility, wall steering, and micro-dodge validation.
+    -- route visibility, wall steering, and dodge-teleport validation.
     for _, playerCharacter in ipairs(
         State:PlayerCharactersForNavigation(false)
     ) do
@@ -3731,199 +3787,6 @@ local function groundAt(
         result.Position.Y + 3,
         position.Z
     )
-end
-
---------------------------------------------------
--- PHYSICS COMBAT HOVER
--- Horizontal travel still comes from Humanoid:Move. This applies
--- vertical force only, so room travel remains ordinary walking and
--- no TweenService movement is used.
---------------------------------------------------
-
-function State:DestroyCombatHover()
-    if self.CombatHoverForce then
-        pcall(function()
-            self.CombatHoverForce:Destroy()
-        end)
-    end
-
-    if self.CombatHoverAttachment then
-        pcall(function()
-            self.CombatHoverAttachment:Destroy()
-        end)
-    end
-
-    self.CombatHoverRoot = nil
-    self.CombatHoverAttachment = nil
-    self.CombatHoverForce = nil
-    self.CombatHoverTargetY = nil
-    self.CombatHoverGroundY = nil
-    self.LastCombatHoverSample = -math.huge
-    self.CombatAirborne = false
-end
-
-function State:EnsureCombatHover(root)
-    if self.CombatHoverRoot == root
-        and self.CombatHoverAttachment
-        and self.CombatHoverAttachment.Parent
-        and self.CombatHoverForce
-        and self.CombatHoverForce.Parent then
-
-        return true
-    end
-
-    self:DestroyCombatHover()
-
-    local attachment =
-        Instance.new("Attachment")
-    attachment.Name =
-        "DQ_V717_CombatHoverAttachment"
-    attachment.Parent = root
-
-    local force =
-        Instance.new("VectorForce")
-    force.Name = "DQ_V717_CombatHoverForce"
-    force.Attachment0 = attachment
-    force.ApplyAtCenterOfMass = true
-    force.RelativeTo =
-        Enum.ActuatorRelativeTo.World
-    force.Force = Vector3.zero
-    force.Parent = root
-
-    self.CombatHoverRoot = root
-    self.CombatHoverAttachment = attachment
-    self.CombatHoverForce = force
-
-    return true
-end
-
-function State:UpdateCombatHover(
-    character,
-    root,
-    humanoid,
-    target
-)
-    local shouldHover =
-        self.AirCombatOrbit
-        and ENABLED
-        and validEnemy(target)
-        and not self.FarTargetRouting
-        and not self.RouteGuidedTarget
-        and not self.AdaptivePathActive
-
-    if not shouldHover then
-        if self.CombatHoverForce
-            and self.CombatHoverForce.Parent then
-
-            self.CombatHoverForce.Force =
-                Vector3.zero
-        end
-
-        self.CombatHoverTargetY = nil
-        self.CombatHoverGroundY = nil
-        self.LastCombatHoverSample = -math.huge
-        self.CombatAirborne = false
-        return
-    end
-
-    if not self:EnsureCombatHover(root) then
-        self.CombatAirborne = false
-        return
-    end
-
-    local now = os.clock()
-    local targetY = self.CombatHoverTargetY
-    local groundY = self.CombatHoverGroundY
-
-    if not targetY
-        or not groundY
-        or now - self.LastCombatHoverSample
-            >= CFG.COMBAT_AIR_SAMPLE_INTERVAL then
-
-        local ground =
-            groundAt(root.Position, character)
-
-        if not ground then
-            self.CombatHoverForce.Force =
-                Vector3.zero
-            self.CombatAirborne = false
-            return
-        end
-
-        groundY = ground.Y
-        targetY =
-            groundY + CFG.COMBAT_AIR_HEIGHT
-
-        local rise = targetY - root.Position.Y
-
-        if rise > 0 then
-            local ceiling =
-                Workspace:Raycast(
-                    root.Position,
-                    Vector3.new(
-                        0,
-                        rise
-                            + CFG.COMBAT_AIR_CEILING_CLEARANCE,
-                        0
-                    ),
-                    rayParams(character)
-                )
-
-            if ceiling
-                and ceiling.Instance
-                and ceiling.Instance:IsA("BasePart")
-                and ceiling.Instance.CanCollide then
-
-                targetY =
-                    math.min(
-                        targetY,
-                        ceiling.Position.Y
-                            - CFG.COMBAT_AIR_CEILING_CLEARANCE
-                    )
-            end
-        end
-
-        self.CombatHoverTargetY = targetY
-        self.CombatHoverGroundY = groundY
-        self.LastCombatHoverSample = now
-    end
-
-    if targetY <= groundY + 1 then
-        self.CombatHoverForce.Force =
-            Vector3.zero
-        self.CombatHoverTargetY = nil
-        self.CombatHoverGroundY = nil
-        self.CombatAirborne = false
-        return
-    end
-
-    local verticalVelocity =
-        root.AssemblyLinearVelocity.Y
-    local errorY =
-        targetY - root.Position.Y
-    local acceleration =
-        math.clamp(
-            errorY * CFG.COMBAT_AIR_RESPONSE
-                - verticalVelocity
-                    * CFG.COMBAT_AIR_DAMPING,
-            -CFG.COMBAT_AIR_MAX_ACCEL,
-            CFG.COMBAT_AIR_MAX_ACCEL
-        )
-    local mass =
-        math.max(root.AssemblyMass, 1)
-
-    self.CombatHoverForce.Force =
-        Vector3.new(
-            0,
-            mass
-                * (
-                    Workspace.Gravity
-                    + acceleration
-                ),
-            0
-        )
-    self.CombatHoverTargetY = targetY
-    self.CombatAirborne = true
 end
 
 --------------------------------------------------
@@ -5546,20 +5409,20 @@ local function dodgeDestinationSafe(
     return safe == true
 end
 
-function State:TryMicroDodgeTeleport(
+function State:TryDodgeTeleport(
     root,
     character,
     destination,
     speed,
     now
 )
-    if not self.MicroDodgeTeleport
+    if not self.TeleportDodge
         or not root
         or not destination
         or self.DodgeTeleportsThisThreat
-            >= CFG.DODGE_MICRO_TELEPORTS_PER_THREAT
-        or now - self.LastDodgeMicroTeleportAt
-            < CFG.DODGE_MICRO_TELEPORT_COOLDOWN then
+            >= CFG.DODGE_TELEPORTS_PER_THREAT
+        or now - self.LastDodgeTeleportAt
+            < CFG.DODGE_TELEPORT_COOLDOWN then
 
         return false
     end
@@ -5568,7 +5431,7 @@ function State:TryMicroDodgeTeleport(
         flat(destination - root.Position)
 
     if delta.Magnitude
-        < CFG.DODGE_MICRO_TELEPORT_MIN then
+        < CFG.DODGE_TELEPORT_MIN then
 
         return false
     end
@@ -5576,7 +5439,7 @@ function State:TryMicroDodgeTeleport(
     local travel =
         math.min(
             delta.Magnitude,
-            CFG.DODGE_MICRO_TELEPORT_DISTANCE
+            CFG.DODGE_TELEPORT_DISTANCE
         )
     local candidate =
         root.Position
@@ -5590,17 +5453,14 @@ function State:TryMicroDodgeTeleport(
             candidate.Z - root.Position.Z
         )
 
-    local allowedGroundDifference =
-        self.CombatAirborne
-        and CFG.COMBAT_AIR_HEIGHT + 4
-        or 2.5
+    local allowedGroundDifference = 2.5
 
     if not grounded
         or math.abs(
             grounded.Y - root.Position.Y
         ) > allowedGroundDifference
         or displacement.Magnitude
-            > CFG.DODGE_MICRO_TELEPORT_DISTANCE
+            > CFG.DODGE_TELEPORT_DISTANCE
                 + 0.01 then
 
         return false
@@ -5634,11 +5494,11 @@ function State:TryMicroDodgeTeleport(
         return false
     end
 
-    self.LastDodgeMicroTeleportAt = now
+    self.LastDodgeTeleportAt = now
     self.DodgeTeleportsThisThreat =
         self.DodgeTeleportsThisThreat + 1
-    self.DodgeMicroTeleports =
-        (self.DodgeMicroTeleports or 0) + 1
+    self.DodgeTeleportCount =
+        (self.DodgeTeleportCount or 0) + 1
 
     return true
 end
@@ -5798,7 +5658,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V717_FacingAttachment"
+        "DQ_V718_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -5809,7 +5669,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V717_Facing"
+        "DQ_V718_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -6501,7 +6361,11 @@ function State:MaximumReadyOffensiveRange()
             if detected then
                 ready = ready
                     and now - lastCast
-                        >= SPELL_SPAM_INTERVAL
+                        >= (
+                            self.TargetIsBoss
+                            and CFG.BOSS_SPELL_SPAM_INTERVAL
+                            or SPELL_SPAM_INTERVAL
+                        )
             else
                 ready = now - lastCast
                     >= currentCooldownLength(letter)
@@ -6561,22 +6425,31 @@ function State:CurrentEnemySpacingPlan()
             )
 
         local readyRange =
-            self:MaximumReadyOffensiveRange()
+            self:BossEffectiveCastRange(
+                self:MaximumReadyOffensiveRange()
+            )
+        local effectiveCastRange =
+            self:BossEffectiveCastRange(
+                castRange
+            )
         local desiredDistance =
             requestedOuter
         local castDistance =
-            castRange > 0
-            and castRange < math.huge
+            effectiveCastRange > 0
+            and effectiveCastRange < math.huge
             and math.max(
-                castRange
+                effectiveCastRange
                     - CFG.BOSS_CAST_RANGE_BUFFER,
-                4
+                CFG.BOSS_MINIMUM_CAST_DISTANCE
             )
             or requestedOuter
         local furthestUsableDistance =
-            math.min(
-                requestedOuter,
-                castDistance
+            math.max(
+                CFG.BOSS_MINIMUM_CAST_DISTANCE,
+                math.min(
+                    requestedOuter,
+                    castDistance
+                )
             )
         local furthestRangeReady =
             readyRange > 0
@@ -6584,10 +6457,10 @@ function State:CurrentEnemySpacingPlan()
                 >= furthestUsableDistance
                     + CFG.BOSS_CAST_RANGE_BUFFER
 
-        -- A short ready spell must never drag the character into a
-        -- boss while the safer long-range spell is cooling down.
-        -- Approach only when an attack that reaches the furthest
-        -- usable cast point is actually ready; otherwise retreat.
+        -- Bosses never use the normal mob ring.  Their physical size
+        -- and a conservative AoE probe allowance extend effective
+        -- reach, while the hard boss floor prevents melee-distance
+        -- casting even when the equipped spell reports a short range.
         if furthestRangeReady then
             desiredDistance =
                 furthestUsableDistance
@@ -6637,7 +6510,7 @@ function State:CurrentEnemySpacingPlan()
         self.EnemySpacingExit =
             spacingExit
         self.EnemySpacingCastRange =
-            castRange
+            effectiveCastRange
 
         return
             desiredDistance,
@@ -6745,7 +6618,15 @@ function State:RefreshBossRangePlan()
     local safeFloor =
         math.max(
             FORCE_SPACE_EXIT,
-            CFG.BOSS_SAFE_RING_OUTER
+            CFG.BOSS_SAFE_RING_OUTER,
+            CFG.BOSS_MINIMUM_CAST_DISTANCE
+        )
+    local preferredOuter =
+        CFG.BOSS_PREFERRED_DISTANCE
+        + math.clamp(
+            self.BossSpacingBonus or 0,
+            0,
+            CFG.BOSS_DEATH_DISTANCE_MAX
         )
 
     if not self.TargetIsBoss then
@@ -6794,17 +6675,21 @@ function State:RefreshBossRangePlan()
 
             local ready =
                 currentAbilityReady(letter)
+            local effectiveRange =
+                self:BossEffectiveCastRange(
+                    ability.Range
+                )
 
             if ability.RangeKnown then
-                if ability.Range > knownRange then
-                    knownRange = ability.Range
+                if effectiveRange > knownRange then
+                    knownRange = effectiveRange
                     knownSlot = letter
                 end
 
                 if ready
-                    and ability.Range > readyRange then
+                    and effectiveRange > readyRange then
 
-                    readyRange = ability.Range
+                    readyRange = effectiveRange
                     readySlot = letter
                 end
 
@@ -6824,7 +6709,7 @@ function State:RefreshBossRangePlan()
     elseif unknownReady then
         -- Unknown spells are tested from the safe ring instead of
         -- making the character repeatedly enter lethal melee range.
-        selectedRange = safeFloor
+        selectedRange = preferredOuter
         self.BossRangeMode = "SAFE PROBE"
         self.BossRangeSlot = "?"
 
@@ -6834,25 +6719,27 @@ function State:RefreshBossRangePlan()
         self.BossRangeSlot = knownSlot
 
     else
-        selectedRange = safeFloor
+        selectedRange = preferredOuter
         self.BossRangeMode = "SAFE FALLBACK"
         self.BossRangeSlot = "-"
     end
 
     local requestedRange =
-        math.max(
-            4,
-            selectedRange - BOSS_RANGE_BUFFER
+        math.min(
+            preferredOuter,
+            math.max(
+                safeFloor,
+                selectedRange - BOSS_RANGE_BUFFER
+            )
         )
 
-    if requestedRange < safeFloor then
-        self.BossEngagementRange = safeFloor
+    self.BossEngagementRange = requestedRange
 
-        if readyRange > 0 then
-            self.BossRangeMode = "OUTRANGED"
-        end
-    else
-        self.BossEngagementRange = requestedRange
+    if readyRange > 0
+        and readyRange
+            < safeFloor + BOSS_RANGE_BUFFER then
+
+        self.BossRangeMode = "SAFE PROBE"
     end
 
     self.BossSpaceDistance =
@@ -7472,11 +7359,25 @@ local SpellFlow = (function()
             AUTO_Q
             and AUTO_E
             and (qBuff or eBuff)
+        local spamInterval =
+            State.TargetIsBoss
+            and CFG.BOSS_SPELL_SPAM_INTERVAL
+            or SPELL_SPAM_INTERVAL
 
         -- Mobs use a deliberately shorter cast cap around their
-        -- mob ring. Bosses use every stud of the detected spell
-        -- reach, so long-range powers fire much earlier on bosses.
-        if not State.TargetIsBoss then
+        -- mob ring. Bosses add their measured body radius and the
+        -- conservative AoE probe allowance, so attacks begin much
+        -- farther away without changing normal-mob casting.
+        if State.TargetIsBoss then
+            qRange =
+                State:BossEffectiveCastRange(
+                    qRange
+                )
+            eRange =
+                State:BossEffectiveCastRange(
+                    eRange
+                )
+        else
             qRange =
                 math.min(
                     qRange,
@@ -7507,14 +7408,14 @@ local SpellFlow = (function()
                     and not self.PairBusy
                     and distance <= qRange
                     and now - self.LastQ
-                        >= SPELL_SPAM_INTERVAL
+                        >= spamInterval
                 local dodgeEReady =
                     AUTO_E
                     and eAbilityReady
                     and not self.PairBusy
                     and distance <= eRange
                     and now - self.LastE
-                        >= SPELL_SPAM_INTERVAL
+                        >= spamInterval
                 local attempted = false
 
                 if dodgeQReady
@@ -7605,7 +7506,7 @@ local SpellFlow = (function()
                 and not self.PairBusy
                 and distance <= qRange
                 and now - self.LastQ
-                    >= SPELL_SPAM_INTERVAL
+                    >= spamInterval
 
             local eReady =
                 AUTO_E
@@ -7613,7 +7514,7 @@ local SpellFlow = (function()
                 and not self.PairBusy
                 and distance <= eRange
                 and now - self.LastE
-                    >= SPELL_SPAM_INTERVAL
+                    >= spamInterval
 
             if buffPair then
                 if qReady
@@ -8050,7 +7951,11 @@ local function updateRemoteCastMode(
             CFG.BOSS_SAFE_RING_OUTER
         )
     local reliableCastLimit =
-        castRange
+        State:IsBossEnemy(target)
+        and State:BossEffectiveCastRange(
+            castRange
+        )
+        or castRange
 
     if target ~= RemoteCastTarget then
         RemoteCastTarget = target
@@ -8186,7 +8091,6 @@ end
 local function resetCombatCycle(nextMode)
     SpellFlow:Reset()
     State.ProfileRouteFlow:ResetForRespawn()
-    State:DestroyCombatHover()
 
     Target = nil
     TargetDistance = math.huge
@@ -8208,6 +8112,7 @@ local function resetCombatCycle(nextMode)
     State.OwnAbilityIgnoreUntil = 0
     State.SpacingActive = false
     State.TargetIsBoss = false
+    State.TargetBodyRadius = 0
     State.TargetPriority = "NONE"
     State.CloseThreatCount = 0
     State.RouteGuidedTarget = false
@@ -8234,7 +8139,7 @@ local function resetCombatCycle(nextMode)
     State.PostDodgeCastExpires = 0
     State.DodgeCastIssuedForThreat = false
     State.DodgeTeleportsThisThreat = 0
-    State.LastDodgeMicroTeleportAt = -math.huge
+    State.LastDodgeTeleportAt = -math.huge
 
     RemoteCastMode = false
     RemoteCastTarget = nil
@@ -8399,6 +8304,13 @@ connect(
         State.TargetIsBoss =
             State:IsBossEnemy(Target)
 
+        State.TargetBodyRadius =
+            State.TargetIsBoss
+            and State:EstimateEnemyHorizontalRadius(
+                Target
+            )
+            or 0
+
         State:RefreshBossRangePlan()
         State:CurrentEnemySpacingPlan()
 
@@ -8531,15 +8443,15 @@ connect(
                 CurrentDodgeDirection =
                     immediateDirection.Unit
 
-                local microDestination =
+                local teleportDestination =
                     root.Position
                     + immediateDirection.Unit
-                        * CFG.DODGE_MICRO_TELEPORT_DISTANCE
+                        * CFG.DODGE_TELEPORT_DISTANCE
 
-                if State:TryMicroDodgeTeleport(
+                if State:TryDodgeTeleport(
                     root,
                     character,
-                    microDestination,
+                    teleportDestination,
                     level == "EMERGENCY"
                         and DODGE_SPEED
                         or EVADE_SPEED,
@@ -8728,7 +8640,7 @@ connect(
                 )
 
             if delta.Magnitude > 2.2 then
-                if State:TryMicroDodgeTeleport(
+                if State:TryDodgeTeleport(
                     root,
                     character,
                     DodgePoint,
@@ -8862,7 +8774,7 @@ connect(
                         or Vector3.zero
 
                 else
-                    if State:TryMicroDodgeTeleport(
+                    if State:TryDodgeTeleport(
                         root,
                         character,
                         EvadePoint,
@@ -9583,12 +9495,6 @@ RunService:BindToRenderStep(
         end
 
         State:MaintainWallNoclip(root)
-        State:UpdateCombatHover(
-            character,
-            root,
-            humanoid,
-            Target
-        )
 
         if not ENABLED then
             humanoid.AutoRotate = true
@@ -10221,7 +10127,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.17-PAR",
+                    Version = "V7.18-DT",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -10291,7 +10197,6 @@ local function createInterface()
                     if not ENABLED then
                         DesiredDirection =
                             Vector3.zero
-                        State:DestroyCombatHover()
                     end
                 end
             })
@@ -10312,37 +10217,22 @@ local function createInterface()
             })
 
             combatControls:Toggle({
-                Title = "Micro Dodge Step",
-                Desc = "At most one verified 3-stud teleport per uninterrupted threat",
-                Value = State.MicroDodgeTeleport,
-                Flag = "DQMicroDodgeTeleport",
+                Title = "Teleport Dodge",
+                Desc = "One verified nearby 7-stud teleport per uninterrupted threat",
+                Value = State.TeleportDodge,
+                Flag = "DQTeleportDodge",
                 Callback = function(value)
-                    State.MicroDodgeTeleport =
+                    State.TeleportDodge =
                         value ~= false
                     State.DodgeTeleportsThisThreat = 0
-                    State.LastDodgeMicroTeleportAt =
+                    State.LastDodgeTeleportAt =
                         -math.huge
                 end
             })
 
             combatControls:Toggle({
-                Title = "Air Combat Orbit",
-                Desc = "Physics hover near enemies; room travel remains normal walking with no tweens",
-                Value = State.AirCombatOrbit,
-                Flag = "DQAirCombatOrbit",
-                Callback = function(value)
-                    State.AirCombatOrbit =
-                        value ~= false
-
-                    if not State.AirCombatOrbit then
-                        State:DestroyCombatHover()
-                    end
-                end
-            })
-
-            combatControls:Toggle({
                 Title = "Adaptive Boss Casting",
-                Desc = "Use detected spell reach for distant or blocked boss casts",
+                Desc = "Cast farther using spell reach, boss body size and a safe AoE probe",
                 Value = State.AdaptiveBossRange,
                 Flag = "DQAdaptiveBossRange",
                 Callback = function(value)
@@ -10428,7 +10318,7 @@ local function createInterface()
 
             combatTab:Paragraph({
                 Title = "Split mob / boss spacing",
-                Desc = "Mobs prefer 48 studs and use the nearest physical mob for the retreat check, never the misleading pack centre. A genuinely short attack uses its furthest reliable distance instead. Bosses start at 60 studs; boss deaths add 8 up to 84.",
+                Desc = "Mobs prefer 48 studs and use the nearest physical mob, never the pack centre. Bosses use a separate 70-stud outer ring, never cast closer than 55, and add measured boss size plus a safe AoE probe to spell reach. Boss deaths add 8 up to a 94-stud outer ring.",
                 Icon = "move-horizontal"
             })
 
@@ -10838,9 +10728,14 @@ local function createInterface()
                         .. tostring(
                             State.BossOuterDistance or 0
                         )
-                        .. "\nDodge micro-TP:"
+                        .. " | Body:+"
+                        .. string.format(
+                            "%.1f",
+                            State.TargetBodyRadius or 0
+                        )
+                        .. "\nDodge teleports:"
                         .. tostring(
-                            State.DodgeMicroTeleports or 0
+                            State.DodgeTeleportCount or 0
                         )
                         .. " | Post-dodge casts:"
                         .. tostring(
@@ -10857,12 +10752,6 @@ local function createInterface()
                         .. " | Live path:"
                         .. (
                             State.AdaptivePathActive
-                            and "ON"
-                            or "OFF"
-                        )
-                        .. " | Air:"
-                        .. (
-                            State.CombatAirborne
                             and "ON"
                             or "OFF"
                         )
@@ -10903,7 +10792,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.17-PAR",
+                "Combat Pilot V7.18-DT",
                 DungeonData.HazardRegistryLoaded
                     and (
                         "Xyneria WindUI loaded with "
@@ -10934,5 +10823,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.17-PAR loaded"
+    "Dungeon Quest Combat Pilot V7.18-DT loaded"
 )

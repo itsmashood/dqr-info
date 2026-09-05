@@ -1,5 +1,6 @@
---// Dungeon Quest Combat Pilot V7.14
+--// Dungeon Quest Combat Pilot V7.15
 --// Safe-gap committed dodge + expanding hazard prediction
+--// Global enemyProjectiles hazard registry + safe/context exclusions
 --// Dense mob-cluster aim + full respawn combat reset
 --// Dynamic spell data + buff-first paired casting
 --// Low-overhead combat loop + cached boss detection
@@ -221,7 +222,8 @@ local oldStates = {
     "DQ_COMBAT_V711",
     "DQ_COMBAT_V712",
     "DQ_COMBAT_V713",
-    "DQ_COMBAT_V714"
+    "DQ_COMBAT_V714",
+    "DQ_COMBAT_V715"
 }
 
 for _, name in ipairs(oldStates) do
@@ -249,7 +251,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V711_RENDER",
     "DQ_COMBAT_V712_RENDER",
     "DQ_COMBAT_V713_RENDER",
-    "DQ_COMBAT_V714_RENDER"
+    "DQ_COMBAT_V714_RENDER",
+    "DQ_COMBAT_V715_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -261,7 +264,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V714_RENDER",
+    RenderName = "DQ_COMBAT_V715_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -289,7 +292,7 @@ local State = {
     LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V714 = State
+ENV.DQ_COMBAT_V715 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -314,6 +317,7 @@ pcall(function()
         "DQCombatV712",
         "DQCombatV713",
         "DQCombatV714",
+        "DQCombatV715",
         "XyneriaUI",
         "WindUI"
     }
@@ -490,7 +494,11 @@ local DungeonData = (function()
     local result = {
         Name = "Universal",
         Profile = nil,
-        Loaded = false
+        Loaded = false,
+        HazardRegistry = nil,
+        HazardRegistryLoaded = false,
+        HazardRegistryError = nil,
+        HazardFamilyCount = 0
     }
 
     local cacheBuster =
@@ -595,6 +603,54 @@ local DungeonData = (function()
         end
 
         return table.concat(values, " ")
+    end
+
+    local registryOk, registryOrError =
+        pcall(function()
+            local registry =
+                compileTable(
+                    game:HttpGet(
+                        freshUrl(
+                            joinUrl(
+                                DUNGEON_PROFILE_BASE_URL,
+                                "hazards.lua"
+                            )
+                        )
+                    ),
+                    "Global hazard registry"
+                )
+
+            if type(registry.Families) ~= "table"
+                or type(registry.Classify) ~= "function" then
+
+                error(
+                    "Global hazard registry has an invalid interface"
+                )
+            end
+
+            return registry
+        end)
+
+    if registryOk then
+        result.HazardRegistry = registryOrError
+        result.HazardRegistryLoaded = true
+
+        for _ in pairs(
+            registryOrError.Families
+        ) do
+            result.HazardFamilyCount =
+                result.HazardFamilyCount + 1
+        end
+    else
+        result.HazardRegistryError =
+            tostring(registryOrError)
+
+        if warn then
+            warn(
+                "Combat Pilot hazard registry fallback: "
+                .. result.HazardRegistryError
+            )
+        end
     end
 
     pcall(function()
@@ -2010,6 +2066,46 @@ function State:ProfileIgnoresHazard(object)
     return false
 end
 
+local function classifyGlobalHazard(object)
+    local registry =
+        DungeonData.HazardRegistry
+
+    if not registry
+        or type(registry.Classify) ~= "function" then
+
+        return nil, false, nil
+    end
+
+    local ok, kind, family =
+        pcall(
+            registry.Classify,
+            registry,
+            object
+        )
+
+    if not ok or not family then
+        return nil, false, nil
+    end
+
+    if kind ~= nil then
+        kind = string.upper(tostring(kind))
+
+        if kind ~= "PRECAST"
+            and kind ~= "HITBOX"
+            and kind ~= "LASER"
+            and kind ~= "PROJECTILE"
+            and kind ~= "ATTACK" then
+
+            kind = nil
+        end
+    end
+
+    -- A matched family with no kind is intentional. The registry uses
+    -- this for safe regions, anchors, harmless visuals, and context-only
+    -- templates; do not let generic detection add them back as hazards.
+    return kind, true, family
+end
+
 local function classifyPart(
     part,
     genericAllowed
@@ -2028,6 +2124,13 @@ local function classifyPart(
 
     if State:ProfileIgnoresHazard(part) then
         return nil
+    end
+
+    local registryKind, registryMatched =
+        classifyGlobalHazard(part)
+
+    if registryMatched then
+        return registryKind
     end
 
     if profileHazards then
@@ -2254,7 +2357,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V714_Hazard"
+        "DQ_V715_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -2377,6 +2480,15 @@ local function registerBeam(beam)
         or not beam:IsA("Beam")
         or isOwnAbility(beam)
         or State:ProfileIgnoresHazard(beam) then
+
+        return
+    end
+
+    local registryKind, registryMatched =
+        classifyGlobalHazard(beam)
+
+    if registryMatched
+        and registryKind ~= "LASER" then
 
         return
     end
@@ -5111,7 +5223,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V714_FacingAttachment"
+        "DQ_V715_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -5122,7 +5234,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V714_Facing"
+        "DQ_V715_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -8861,7 +8973,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.14",
+                    Version = "V7.15",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -9401,6 +9513,17 @@ local function createInterface()
                         )
                         .. "\nProfile: "
                         .. DungeonData.Name
+                        .. "\nHazard DB: "
+                        .. (
+                            DungeonData.HazardRegistryLoaded
+                            and (
+                                "ON/"
+                                .. tostring(
+                                    DungeonData.HazardFamilyCount
+                                )
+                            )
+                            or "FALLBACK"
+                        )
                         .. "\nStart:"
                         .. (
                             AUTO_START
@@ -9425,9 +9548,22 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.14",
-                "Footagesus WindUI loaded with the Xyneria theme.",
-                "check",
+                "Combat Pilot V7.15",
+                DungeonData.HazardRegistryLoaded
+                    and (
+                        "Xyneria WindUI loaded with "
+                        .. tostring(
+                            DungeonData.HazardFamilyCount
+                        )
+                        .. " hazard families."
+                    )
+                    or (
+                        "Xyneria WindUI loaded; hazard DB unavailable, "
+                        .. "using universal fallback."
+                    ),
+                DungeonData.HazardRegistryLoaded
+                    and "check"
+                    or "triangle-alert",
                 2
             )
         end)
@@ -9443,5 +9579,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.14 loaded"
+    "Dungeon Quest Combat Pilot V7.15 loaded"
 )

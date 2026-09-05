@@ -1,5 +1,5 @@
---// Dungeon Quest Combat Pilot V7.18
---// Build: V7.18-TELEPORT-BOSS-RANGE-20260905
+--// Dungeon Quest Combat Pilot V7.19
+--// Build: V7.19-WALK-DODGE-FACING-LOCK-20260905
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Global enemyProjectiles hazard registry + safe/context exclusions
 --// PRECAST warning zones + strict no-contact live-hazard envelopes
@@ -10,7 +10,8 @@
 --// Shared enemy spacing + optional live adaptive pathfinding
 --// Long-range boss cast/retreat cycle + boss-only death spacing
 --// Nearest-body mob spacing + party-safe far-target routing
---// Nearby verified teleport dodge; no flight and no tween movement
+--// Walking-only dodge; no teleport, flight, or tween movement
+--// Persistent live-target facing through dodge, route, and target refresh gaps
 --// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -116,10 +117,7 @@ local CFG = {
     BOSS_CAST_ENTER_OFFSET = 2,
     BOSS_CAST_EXIT_OFFSET = 0.75,
     POST_DODGE_CAST_WINDOW = 0.45,
-    DODGE_TELEPORT_DISTANCE = 7.0,
-    DODGE_TELEPORT_COOLDOWN = 0.40,
-    DODGE_TELEPORT_MIN = 1.20,
-    DODGE_TELEPORTS_PER_THREAT = 1,
+    FACING_TARGET_GRACE = 0.30,
     COMBAT_DEATH_STREAK_WINDOW = 180,
     BODY_RADIUS = 2.2,
     PREDICT_NEAR = 0.24,
@@ -238,6 +236,10 @@ local function stopOld(name)
     if old.DestroyCombatHover then
         pcall(old.DestroyCombatHover, old)
     end
+
+    if old.DestroyFacing then
+        pcall(old.DestroyFacing, old)
+    end
 end
 
 local oldStates = {
@@ -269,7 +271,8 @@ local oldStates = {
     "DQ_COMBAT_V715",
     "DQ_COMBAT_V716",
     "DQ_COMBAT_V717",
-    "DQ_COMBAT_V718"
+    "DQ_COMBAT_V718",
+    "DQ_COMBAT_V719"
 }
 
 for _, name in ipairs(oldStates) do
@@ -301,7 +304,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V715_RENDER",
     "DQ_COMBAT_V716_RENDER",
     "DQ_COMBAT_V717_RENDER",
-    "DQ_COMBAT_V718_RENDER"
+    "DQ_COMBAT_V718_RENDER",
+    "DQ_COMBAT_V719_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -313,12 +317,11 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V718_RENDER",
+    RenderName = "DQ_COMBAT_V719_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
     WallNoclip = true,
-    TeleportDodge = true,
     AdaptiveBossRange = true,
     AdaptiveModel = false,
     AdaptivePathActive = false,
@@ -352,9 +355,9 @@ local State = {
     PostDodgeCastRequests = 0,
     PostDodgeCastAttempts = 0,
     DodgeCastIssuedForThreat = false,
-    DodgeTeleportsThisThreat = 0,
-    DodgeTeleportCount = 0,
-    LastDodgeTeleportAt = -math.huge,
+    FacingLastTarget = nil,
+    FacingLastAimPosition = nil,
+    FacingLastSeenAt = -math.huge,
     CloseThreatCount = 0,
     RouteGuidedTarget = false,
     FarTargetRouting = false,
@@ -375,7 +378,7 @@ local State = {
     LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V718 = State
+ENV.DQ_COMBAT_V719 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -404,6 +407,7 @@ pcall(function()
         "DQCombatV716",
         "DQCombatV717",
         "DQCombatV718",
+        "DQCombatV719",
         "XyneriaUI",
         "WindUI"
     }
@@ -2552,7 +2556,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V718_Hazard"
+        "DQ_V719_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3717,7 +3721,7 @@ local function rayParams(character)
 
     -- Other players are dynamic actors, not dungeon walls or valid
     -- ground. Ignoring them prevents party members from breaking
-    -- route visibility, wall steering, and dodge-teleport validation.
+    -- route visibility, wall steering, and walk-dodge validation.
     for _, playerCharacter in ipairs(
         State:PlayerCharactersForNavigation(false)
     ) do
@@ -5409,100 +5413,6 @@ local function dodgeDestinationSafe(
     return safe == true
 end
 
-function State:TryDodgeTeleport(
-    root,
-    character,
-    destination,
-    speed,
-    now
-)
-    if not self.TeleportDodge
-        or not root
-        or not destination
-        or self.DodgeTeleportsThisThreat
-            >= CFG.DODGE_TELEPORTS_PER_THREAT
-        or now - self.LastDodgeTeleportAt
-            < CFG.DODGE_TELEPORT_COOLDOWN then
-
-        return false
-    end
-
-    local delta =
-        flat(destination - root.Position)
-
-    if delta.Magnitude
-        < CFG.DODGE_TELEPORT_MIN then
-
-        return false
-    end
-
-    local travel =
-        math.min(
-            delta.Magnitude,
-            CFG.DODGE_TELEPORT_DISTANCE
-        )
-    local candidate =
-        root.Position
-        + delta.Unit * travel
-    local grounded =
-        groundAt(candidate, character)
-    local displacement =
-        Vector3.new(
-            candidate.X - root.Position.X,
-            0,
-            candidate.Z - root.Position.Z
-        )
-
-    local allowedGroundDifference = 2.5
-
-    if not grounded
-        or math.abs(
-            grounded.Y - root.Position.Y
-        ) > allowedGroundDifference
-        or displacement.Magnitude
-            > CFG.DODGE_TELEPORT_DISTANCE
-                + 0.01 then
-
-        return false
-    end
-
-    local safe =
-        routeSafe(
-            root.Position,
-            root.Position + displacement,
-            speed
-        )
-
-    if not safe
-        or not staticRouteClear(
-            root.Position,
-            root.Position + displacement,
-            character
-        ) then
-
-        return false
-    end
-
-    local moved =
-        pcall(function()
-            root.CFrame =
-                root.CFrame
-                + displacement
-        end)
-
-    if not moved then
-        return false
-    end
-
-    self.LastDodgeTeleportAt = now
-    self.DodgeTeleportsThisThreat =
-        self.DodgeTeleportsThisThreat + 1
-    self.DodgeTeleportCount =
-        (self.DodgeTeleportCount or 0) + 1
-
-    return true
-end
-
 --------------------------------------------------
 -- PATHFINDING
 --------------------------------------------------
@@ -5631,14 +5541,7 @@ local FacingRoot = nil
 local FacingAttachment = nil
 local FacingAlign = nil
 
-local function createFacing(root)
-    if FacingRoot == root
-        and FacingAlign
-        and FacingAlign.Parent then
-
-        return
-    end
-
+function State:DestroyFacing()
     if FacingAlign then
         pcall(function()
             FacingAlign:Destroy()
@@ -5647,9 +5550,44 @@ local function createFacing(root)
 
     if FacingAttachment then
         pcall(function()
-            FacingAttachment:
-                Destroy()
+            FacingAttachment:Destroy()
         end)
+    end
+
+    FacingRoot = nil
+    FacingAttachment = nil
+    FacingAlign = nil
+end
+
+local function createFacing(root)
+    if FacingRoot == root
+        and FacingAttachment
+        and FacingAttachment.Parent == root
+        and FacingAlign
+        and FacingAlign.Parent == root
+        and FacingAlign.Attachment0
+            == FacingAttachment then
+
+        return
+    end
+
+    State:DestroyFacing()
+
+    -- Versions before V7.19 did not expose a teardown hook, so an
+    -- update could leave a live orientation constraint on the same
+    -- root. Remove every legacy Combat Pilot facing object before
+    -- creating the single authoritative controller.
+    for _, object in ipairs(
+        root:GetChildren()
+    ) do
+        if string.match(
+            object.Name or "",
+            "^DQ_V%d+_Facing"
+        ) then
+            pcall(function()
+                object:Destroy()
+            end)
+        end
     end
 
     FacingAttachment =
@@ -5658,7 +5596,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V718_FacingAttachment"
+        "DQ_V719_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -5669,7 +5607,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V718_Facing"
+        "DQ_V719_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -5679,16 +5617,16 @@ local function createFacing(root)
         FacingAttachment
 
     FacingAlign.RigidityEnabled =
-        true
+        false
 
     FacingAlign.Responsiveness =
         200
 
     FacingAlign.MaxTorque =
-        1000000000
+        math.huge
 
     FacingAlign.MaxAngularVelocity =
-        100
+        math.huge
 
     FacingAlign.Parent =
         root
@@ -5703,13 +5641,45 @@ local function faceTarget(
 )
     createFacing(root)
 
-    if not validEnemy(target) then
-        FacingAlign.Enabled = false
-        return false
+    local now = os.clock()
+    local activeTarget = target
+    local activeAim = aimPosition
+    local currentTargetValid =
+        validEnemy(target)
+
+    -- A target can disappear for one acquisition tick while enemy
+    -- folders are reparented or refreshed. Keep the last live target
+    -- for a very short grace period so route/dodge movement cannot
+    -- steal the character's facing during that transient gap.
+    if not currentTargetValid then
+        if now - (
+            State.FacingLastSeenAt
+                or -math.huge
+        ) <= CFG.FACING_TARGET_GRACE
+            and validEnemy(
+                State.FacingLastTarget
+            ) then
+
+            activeTarget =
+                State.FacingLastTarget
+            activeAim =
+                State.FacingLastAimPosition
+
+        elseif validEnemy(
+            State.NearestEnemy
+        ) then
+
+            activeTarget =
+                State.NearestEnemy
+            activeAim = nil
+        else
+            FacingAlign.Enabled = false
+            return false
+        end
     end
 
     local enemyRoot =
-        target:FindFirstChild(
+        activeTarget:FindFirstChild(
             "HumanoidRootPart"
         )
 
@@ -5718,16 +5688,39 @@ local function faceTarget(
         return false
     end
 
+    if currentTargetValid
+        or activeTarget
+            == State.NearestEnemy then
+
+        State.FacingLastTarget =
+            activeTarget
+        State.FacingLastSeenAt = now
+        State.FacingLastAimPosition =
+            activeAim or enemyRoot.Position
+    end
+
     local direction =
         flat(
             (
-                aimPosition
+                activeAim
                 or enemyRoot.Position
             )
             - root.Position
         )
 
+    -- The player can stand exactly on a pack's averaged centre even
+    -- though the selected mob is beside them. Never return with a
+    -- zero aim vector; fall back to that live enemy body instead.
     if direction.Magnitude < 0.05 then
+        direction =
+            flat(
+                enemyRoot.Position
+                - root.Position
+            )
+    end
+
+    if direction.Magnitude < 0.05 then
+        FacingAlign.Enabled = true
         return true
     end
 
@@ -8138,8 +8131,9 @@ local function resetCombatCycle(nextMode)
     State.PostDodgeCastPending = false
     State.PostDodgeCastExpires = 0
     State.DodgeCastIssuedForThreat = false
-    State.DodgeTeleportsThisThreat = 0
-    State.LastDodgeTeleportAt = -math.huge
+    State.FacingLastTarget = nil
+    State.FacingLastAimPosition = nil
+    State.FacingLastSeenAt = -math.huge
 
     RemoteCastMode = false
     RemoteCastTarget = nil
@@ -8401,7 +8395,6 @@ connect(
 
         if threatAppeared then
             State.DodgeCastIssuedForThreat = false
-            State.DodgeTeleportsThisThreat = 0
             State.PostDodgeCastPending = false
         end
 
@@ -8442,23 +8435,6 @@ connect(
             if immediateDirection then
                 CurrentDodgeDirection =
                     immediateDirection.Unit
-
-                local teleportDestination =
-                    root.Position
-                    + immediateDirection.Unit
-                        * CFG.DODGE_TELEPORT_DISTANCE
-
-                if State:TryDodgeTeleport(
-                    root,
-                    character,
-                    teleportDestination,
-                    level == "EMERGENCY"
-                        and DODGE_SPEED
-                        or EVADE_SPEED,
-                    now
-                ) then
-                    State:RequestPostDodgeCast(now)
-                end
 
                 Mode =
                     level == "EMERGENCY"
@@ -8640,16 +8616,6 @@ connect(
                 )
 
             if delta.Magnitude > 2.2 then
-                if State:TryDodgeTeleport(
-                    root,
-                    character,
-                    DodgePoint,
-                    DODGE_SPEED,
-                    now
-                ) then
-                    State:RequestPostDodgeCast(now)
-                end
-
                 DesiredDirection =
                     wallSteer(
                         delta,
@@ -8774,16 +8740,6 @@ connect(
                         or Vector3.zero
 
                 else
-                    if State:TryDodgeTeleport(
-                        root,
-                        character,
-                        EvadePoint,
-                        EVADE_SPEED,
-                        now
-                    ) then
-                        State:RequestPostDodgeCast(now)
-                    end
-
                     DesiredDirection =
                         wallSteer(
                             delta,
@@ -10127,7 +10083,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.18-DT",
+                    Version = "V7.19-WF",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -10213,20 +10169,6 @@ local function createInterface()
                     if not State.WallNoclip then
                         State:RestoreWalls()
                     end
-                end
-            })
-
-            combatControls:Toggle({
-                Title = "Teleport Dodge",
-                Desc = "One verified nearby 7-stud teleport per uninterrupted threat",
-                Value = State.TeleportDodge,
-                Flag = "DQTeleportDodge",
-                Callback = function(value)
-                    State.TeleportDodge =
-                        value ~= false
-                    State.DodgeTeleportsThisThreat = 0
-                    State.LastDodgeTeleportAt =
-                        -math.huge
                 end
             })
 
@@ -10733,10 +10675,7 @@ local function createInterface()
                             "%.1f",
                             State.TargetBodyRadius or 0
                         )
-                        .. "\nDodge teleports:"
-                        .. tostring(
-                            State.DodgeTeleportCount or 0
-                        )
+                        .. "\nDodge movement:WALK"
                         .. " | Post-dodge casts:"
                         .. tostring(
                             State.PostDodgeCastAttempts or 0
@@ -10792,7 +10731,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.18-DT",
+                "Combat Pilot V7.19-WF",
                 DungeonData.HazardRegistryLoaded
                     and (
                         "Xyneria WindUI loaded with "
@@ -10823,5 +10762,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.18-DT loaded"
+    "Dungeon Quest Combat Pilot V7.19-WF loaded"
 )

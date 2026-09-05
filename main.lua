@@ -1,11 +1,12 @@
 --// Dungeon Quest Combat Pilot V7.15
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Global enemyProjectiles hazard registry + safe/context exclusions
+--// PRECAST warning zones + strict no-contact live-hazard envelopes
 --// Dense mob-cluster aim + full respawn combat reset
 --// Dynamic spell data + buff-first paired casting
 --// Low-overhead combat loop + cached boss detection
 --// Close-chaser priority + route-guided distant targets
---// Per-spell boss range control + optional live adaptive pathfinding
+--// Shared enemy spacing + optional live adaptive pathfinding
 --// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -120,9 +121,17 @@ local CFG = {
     EXPAND_OUTWARD_WEIGHT = 0.32,
     WARNING_EXTRA = 7.0,
     EMERGENCY_EXTRA = 2.2,
+    PRECAST_WARNING_EXTRA = 8.5,
+    PRECAST_EMERGENCY_EXTRA = 1.0,
+    LIVE_WARNING_EXTRA = 12.0,
+    LIVE_EMERGENCY_EXTRA = 5.0,
+    LIVE_IMPACT_EXTRA = 4.0,
     EXIT_EXTRA = 0.8,
     ROUTE_EXTRA = 1.2,
     DESTINATION_EXTRA = 2.0,
+    LIVE_EXIT_EXTRA = 3.0,
+    LIVE_ROUTE_EXTRA = 4.5,
+    LIVE_DESTINATION_EXTRA = 6.0,
     PRECAST_LIFE = 1.05,
     HITBOX_LIFE = 0.50,
     ATTACK_LIFE = 0.85,
@@ -3186,6 +3195,30 @@ end
 -- FIND MAIN THREAT
 --------------------------------------------------
 
+local function isLiveHazard(hazard)
+    local kind =
+        hazard and hazard.Kind
+
+    return kind == "HITBOX"
+        or kind == "ATTACK"
+        or kind == "PROJECTILE"
+        or kind == "LASER"
+end
+
+local function hazardSafetyMargins(hazard)
+    if isLiveHazard(hazard) then
+        return
+            CFG.LIVE_EXIT_EXTRA,
+            CFG.LIVE_ROUTE_EXTRA,
+            CFG.LIVE_DESTINATION_EXTRA
+    end
+
+    return
+        CFG.EXIT_EXTRA,
+        CFG.ROUTE_EXTRA,
+        CFG.DESTINATION_EXTRA
+end
+
 local function hazardSpeed(hazard)
     if hazard.Type == "PART" then
         return flat(
@@ -3264,6 +3297,29 @@ local function getThreat(
                 or name:find("slam", 1, true)
             ) ~= nil
 
+        local liveHazard =
+            isLiveHazard(hazard)
+
+        local precast =
+            hazard.Kind == "PRECAST"
+
+        local emergencyExtra =
+            liveHazard
+            and CFG.LIVE_EMERGENCY_EXTRA
+            or precast
+                and CFG.PRECAST_EMERGENCY_EXTRA
+            or CFG.EMERGENCY_EXTRA
+
+        local warningExtra =
+            liveHazard
+            and CFG.LIVE_WARNING_EXTRA
+            or precast
+                and CFG.PRECAST_WARNING_EXTRA
+            or CFG.WARNING_EXTRA
+
+        local livePriority =
+            liveHazard and -4000 or 0
+
         local current =
             hazardDistance(
                 position,
@@ -3292,7 +3348,11 @@ local function getThreat(
 
         local impactClearance =
             CFG.BODY_RADIUS
-            + 1.0
+            + (
+                liveHazard
+                and CFG.LIVE_IMPACT_EXTRA
+                or 1.0
+            )
             + (
                 bobStyleCircle
                 and CFG.EXPAND_EMERGENCY_EXTRA
@@ -3357,7 +3417,7 @@ local function getThreat(
         local emergency =
             current
                 <= CFG.BODY_RADIUS
-                    + CFG.EMERGENCY_EXTRA
+                    + emergencyExtra
                     + (
                         bobStyleCircle
                         and CFG.EXPAND_EMERGENCY_EXTRA
@@ -3365,7 +3425,7 @@ local function getThreat(
                     )
             or nearFuture
                 <= CFG.BODY_RADIUS
-                    + 0.7
+                    + emergencyExtra
                     + (
                         bobStyleCircle
                         and CFG.EXPAND_EMERGENCY_EXTRA
@@ -3382,7 +3442,7 @@ local function getThreat(
             warning =
                 predicted
                     <= CFG.BODY_RADIUS
-                        + CFG.WARNING_EXTRA
+                        + warningExtra
                         + (
                             bobStyleCircle
                             and CFG.EXPAND_WARNING_EXTRA
@@ -3402,6 +3462,7 @@ local function getThreat(
 
             score =
                 -1000
+                + livePriority
                 + predicted
                 + current
                 + (
@@ -3414,6 +3475,7 @@ local function getThreat(
 
             score =
                 -100
+                + livePriority
                 + predicted
                 + current
                 - math.max(
@@ -3884,6 +3946,11 @@ local function routeSafe(
     for _, hazard in pairs(
         Hazards
     ) do
+        local exitExtra,
+            routeExtra,
+            destinationExtra =
+                hazardSafetyMargins(hazard)
+
         local startDistance =
             hazardDistance(
                 startPosition,
@@ -3894,7 +3961,7 @@ local function routeSafe(
         local startedInside =
             startDistance
             <= CFG.BODY_RADIUS
-                + CFG.EXIT_EXTRA
+                + exitExtra
 
         local escaped =
             not startedInside
@@ -3931,7 +3998,7 @@ local function routeSafe(
             if not escaped then
                 if distance
                     > CFG.BODY_RADIUS
-                        + CFG.EXIT_EXTRA then
+                        + exitExtra then
 
                     escaped = true
                 end
@@ -3939,7 +4006,7 @@ local function routeSafe(
             else
                 if distance
                     <= CFG.BODY_RADIUS
-                        + CFG.ROUTE_EXTRA then
+                        + routeExtra then
 
                     return false, 0
                 end
@@ -3966,7 +4033,7 @@ local function routeSafe(
 
         if destinationDistance
             <= CFG.BODY_RADIUS
-                + CFG.DESTINATION_EXTRA then
+                + destinationExtra then
 
             return false, 0
         end
@@ -4887,38 +4954,6 @@ local function findEscape(
                         if enemyDistance < 8 then
                             score =
                                 score + 30
-
-                        elseif State:IsBossEnemy(enemy) then
-                            if enemyDistance
-                                < CFG.BOSS_SAFE_RING_INNER then
-
-                                score =
-                                    score
-                                    + 35
-                                    + (
-                                        CFG.BOSS_SAFE_RING_INNER
-                                        - enemyDistance
-                                    ) * 12
-
-                            elseif enemyDistance
-                                > CFG.BOSS_SAFE_RING_OUTER then
-
-                                score =
-                                    score
-                                    + 45
-                                    + (
-                                        enemyDistance
-                                        - CFG.BOSS_SAFE_RING_OUTER
-                                    ) * 14
-
-                            else
-                                score =
-                                    score
-                                    + math.abs(
-                                        enemyDistance
-                                        - DESIRED_DISTANCE
-                                    ) * 1.4
-                            end
 
                         elseif soft then
                             score =
@@ -6994,7 +7029,6 @@ local function stationaryResetCheck(root)
         or Mode == "OFF"
         or Mode == "COOLDOWN"
         or Mode == "RANGED"
-        or Mode == "BOSS HOLD"
         or Mode == "DODGE HOLD"
         or Mode == "EVADE HOLD"
         or Mode == "RESETTING"
@@ -7954,16 +7988,11 @@ connect(
         local navigationPosition =
             combatNavigationPosition
 
+        -- Every target uses one shared enemy-spacing system. Boss
+        -- identity still controls targeting and recasting, never the
+        -- distance at which movement approaches or retreats.
         local movementStopDistance =
-            State.TargetIsBoss
-            and (
-                State.BossEngagementRange
-                or math.max(
-                    DESIRED_DISTANCE,
-                    CFG.BOSS_SAFE_RING_OUTER
-                )
-            )
-            or DESIRED_DISTANCE + 4
+            DESIRED_DISTANCE + 4
 
         local needsApproach =
             TargetDistance
@@ -8190,46 +8219,7 @@ connect(
         -- FORCED PERSONAL SPACE WITH HYSTERESIS
         --------------------------------------------------
 
-        if State.TargetIsBoss then
-            local radial = toward.Unit
-
-            if TargetDistance
-                < (
-                    State.BossSpaceDistance
-                    or FORCE_SPACE_ENTER
-                ) then
-
-                Mode = "BOSS SPACE"
-                DesiredSpeed = SPACE_SPEED
-                DesiredDirection =
-                    wallSteer(
-                        -radial,
-                        root,
-                        character
-                    )
-
-            elseif TargetDistance
-                > movementStopDistance + 0.5 then
-
-                Mode =
-                    State.RouteGuidedTarget
-                    and "BOSS ROUTE"
-                    or "BOSS CHASE"
-                DesiredSpeed = CHASE_SPEED
-                DesiredDirection =
-                    wallSteer(
-                        radial,
-                        root,
-                        character
-                    )
-
-            else
-                Mode = "BOSS HOLD"
-                DesiredSpeed = 0
-                DesiredDirection = Vector3.zero
-            end
-
-        elseif State.SpacingActive then
+        if State.SpacingActive then
 
             Mode = "SPACE"
             DesiredSpeed = SPACE_SPEED
@@ -9063,8 +9053,8 @@ local function createInterface()
             })
 
             combatControls:Toggle({
-                Title = "Adaptive Boss Range",
-                Desc = "Cast at each spell's maximum known range and preserve the boss safety ring",
+                Title = "Adaptive Boss Casting",
+                Desc = "Use detected spell reach for far or blocked boss casts; movement still follows shared enemy spacing",
                 Value = State.AdaptiveBossRange,
                 Flag = "DQAdaptiveBossRange",
                 Callback = function(value)
@@ -9149,8 +9139,8 @@ local function createInterface()
             })
 
             combatTab:Paragraph({
-                Title = "Forced mob spacing",
-                Desc = "Retreat inside 14 studs; resume at 17 studs.",
+                Title = "Forced enemy spacing",
+                Desc = "Every mob and boss uses the same retreat, release, chase and orbit distances.",
                 Icon = "move-horizontal"
             })
 
@@ -9324,6 +9314,8 @@ local function createInterface()
                     statusElapsed = 0
 
                     local hazardCount = 0
+                    local precastCount = 0
+                    local liveHazardCount = 0
                     local expandingCount = 0
                     local laserCount = 0
                     local projectileCount = 0
@@ -9334,6 +9326,14 @@ local function createInterface()
                     ) do
                         hazardCount =
                             hazardCount + 1
+
+                        if hazard.Kind == "PRECAST" then
+                            precastCount =
+                                precastCount + 1
+                        elseif isLiveHazard(hazard) then
+                            liveHazardCount =
+                                liveHazardCount + 1
+                        end
 
                         if hazard.Expanding then
                             expandingCount =
@@ -9438,7 +9438,11 @@ local function createInterface()
                         .. expandingCount
                         .. "\nHazards: "
                         .. hazardCount
-                        .. " | Lasers:"
+                        .. " | Live:"
+                        .. liveHazardCount
+                        .. " | Pre:"
+                        .. precastCount
+                        .. "\nLasers:"
                         .. laserCount
                         .. " | Proj:"
                         .. projectileCount
@@ -9481,7 +9485,7 @@ local function createInterface()
                         .. State:AbilityRangeStatus("Q")
                         .. " | "
                         .. State:AbilityRangeStatus("E")
-                        .. "\nBoss hold: "
+                        .. "\nBoss cast plan: "
                         .. string.format(
                             "%.1f",
                             State.BossEngagementRange

@@ -1,5 +1,5 @@
---// Dungeon Quest Combat Pilot V7.21
---// Build: V7.21-AGGRESSIVE-ADAPTIVE-UNSTUCK-20260905
+--// Dungeon Quest Combat Pilot V7.22
+--// Build: V7.22-LOCAL-SPACING-LOS-20260905
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Global enemyProjectiles hazard registry + safe/context exclusions
 --// PRECAST warning zones + strict no-contact live-hazard envelopes
@@ -17,6 +17,7 @@
 --// True Spam survives respawn and never waits for a target, pack, or range gate
 --// Warning casts continue while moving; emergency attacks resume after first dodge
 --// Fast dodge-stall recovery discards blocked points and reverses escape side
+--// Personal-space retreat only follows a local, unobstructed enemy body
 --// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -139,6 +140,10 @@ local CFG = {
     ADAPTIVE_CAST_RISK_LIMIT = 0.92,
     DODGE_PROGRESS_INTERVAL = 0.28,
     DODGE_PROGRESS_MIN = 0.35,
+    SPACING_ENEMY_REFRESH = 0.075,
+    SPACING_ENEMY_VERTICAL_LIMIT = 18,
+    SPACING_ENEMY_SCAN_EXTRA = 12,
+    SPACING_ENEMY_RAY_LIMIT = 8,
     COMBAT_DEATH_STREAK_WINDOW = 180,
     BODY_RADIUS = 2.2,
     PREDICT_NEAR = 0.24,
@@ -295,7 +300,8 @@ local oldStates = {
     "DQ_COMBAT_V718",
     "DQ_COMBAT_V719",
     "DQ_COMBAT_V720",
-    "DQ_COMBAT_V721"
+    "DQ_COMBAT_V721",
+    "DQ_COMBAT_V722"
 }
 
 for _, name in ipairs(oldStates) do
@@ -330,7 +336,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V718_RENDER",
     "DQ_COMBAT_V719_RENDER",
     "DQ_COMBAT_V720_RENDER",
-    "DQ_COMBAT_V721_RENDER"
+    "DQ_COMBAT_V721_RENDER",
+    "DQ_COMBAT_V722_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -342,7 +349,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V721_RENDER",
+    RenderName = "DQ_COMBAT_V722_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -383,6 +390,11 @@ local State = {
     TargetPriority = "NONE",
     NearestEnemy = nil,
     NearestEnemyDistance = math.huge,
+    NearestSpacingEnemy = nil,
+    NearestSpacingDistance = math.huge,
+    NearestSpacingClear = false,
+    LastSpacingEnemyUpdate = -math.huge,
+    SpacingTarget = nil,
     EnemySpacingBonus = 0,
     EnemySpacingDistance = DESIRED_DISTANCE,
     EnemySpacingEnter = FORCE_SPACE_ENTER,
@@ -433,7 +445,7 @@ local State = {
     LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V721 = State
+ENV.DQ_COMBAT_V722 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -465,6 +477,7 @@ pcall(function()
         "DQCombatV719",
         "DQCombatV720",
         "DQCombatV721",
+        "DQCombatV722",
         "XyneriaUI",
         "WindUI"
     }
@@ -2613,7 +2626,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V721_Hazard"
+        "DQ_V722_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -3911,6 +3924,158 @@ local function staticRouteClear(
     return
         not blocked(low)
         and not blocked(high)
+end
+
+--------------------------------------------------
+-- LOCAL PERSONAL-SPACE THREAT
+--------------------------------------------------
+
+function State:RefreshNearestSpacingEnemy(
+    root,
+    character,
+    target,
+    now
+)
+    local targetChanged =
+        State.SpacingTarget ~= target
+
+    if not targetChanged
+        and now - State.LastSpacingEnemyUpdate
+            < CFG.SPACING_ENEMY_REFRESH then
+
+        local cached =
+            State.NearestSpacingEnemy
+
+        if validEnemy(cached) then
+            local cachedRoot =
+                cached:FindFirstChild(
+                    "HumanoidRootPart"
+                )
+
+            if cachedRoot then
+                State.NearestSpacingDistance =
+                    (
+                        flat(cachedRoot.Position)
+                        - flat(root.Position)
+                    ).Magnitude
+                return cached,
+                    State.NearestSpacingDistance
+            end
+        end
+
+        State.NearestSpacingEnemy = nil
+        State.NearestSpacingDistance = math.huge
+        State.NearestSpacingClear = false
+        return nil, math.huge
+    end
+
+    State.LastSpacingEnemyUpdate = now
+    State.SpacingTarget = target
+
+    local targetOrder =
+        enemyRoomOrder(target)
+    local scanDistance =
+        math.max(
+            State.EnemySpacingExit
+                or FORCE_SPACE_EXIT,
+            State.BossSpaceDistance or 0,
+            CFG.CHASER_PRIORITY_DISTANCE
+        )
+        + CFG.SPACING_ENEMY_SCAN_EXTRA
+    local candidates = {}
+
+    for enemy in pairs(Enemies) do
+        if not validEnemy(enemy) then
+            Enemies[enemy] = nil
+        else
+            local enemyRoot =
+                enemy:FindFirstChild(
+                    "HumanoidRootPart"
+                )
+
+            if enemyRoot
+                and math.abs(
+                    enemyRoot.Position.Y
+                    - root.Position.Y
+                ) <= CFG.SPACING_ENEMY_VERTICAL_LIMIT then
+
+                local enemyOrder =
+                    enemyRoomOrder(enemy)
+                local selectedDanger =
+                    State.TargetPriority == "DANGER"
+                    and enemy == target
+                local sameEncounter =
+                    selectedDanger
+                    or targetOrder == nil
+                    or (
+                        enemyOrder ~= nil
+                        and enemyOrder == targetOrder
+                    )
+
+                if sameEncounter then
+                    local distance =
+                        (
+                            flat(enemyRoot.Position)
+                            - flat(root.Position)
+                        ).Magnitude
+
+                    if distance <= scanDistance then
+                        table.insert(
+                            candidates,
+                            {
+                                Enemy = enemy,
+                                Root = enemyRoot,
+                                Distance = distance
+                            }
+                        )
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(
+        candidates,
+        function(a, b)
+            return a.Distance < b.Distance
+        end
+    )
+
+    local selected = nil
+    local selectedDistance = math.huge
+    local rayCount = 0
+
+    for _, candidate in ipairs(candidates) do
+        if rayCount
+            >= CFG.SPACING_ENEMY_RAY_LIMIT then
+
+            break
+        end
+
+        rayCount = rayCount + 1
+
+        -- Enemy folders and hazards are excluded by the shared
+        -- static route ray. A solid dungeon object between the
+        -- player and this body means it cannot command a retreat.
+        if staticRouteClear(
+            root.Position,
+            candidate.Root.Position,
+            character
+        ) then
+            selected = candidate.Enemy
+            selectedDistance =
+                candidate.Distance
+            break
+        end
+    end
+
+    State.NearestSpacingEnemy = selected
+    State.NearestSpacingDistance =
+        selectedDistance
+    State.NearestSpacingClear =
+        selected ~= nil
+
+    return selected, selectedDistance
 end
 
 --------------------------------------------------
@@ -5653,7 +5818,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V721_FacingAttachment"
+        "DQ_V722_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -5664,7 +5829,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V721_Facing"
+        "DQ_V722_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -8288,17 +8453,20 @@ function State:AdaptiveThink(
     local spacingEnter =
         self.EnemySpacingEnter
         or FORCE_SPACE_ENTER
+    local immediateSpacingDistance =
+        self.NearestSpacingDistance
+        or math.huge
 
-    if self.NearestEnemyDistance
+    if immediateSpacingDistance
         < math.huge
-        and self.NearestEnemyDistance
+        and immediateSpacingDistance
             < spacingEnter then
 
         proximityRisk =
             math.clamp(
                 (
                     spacingEnter
-                    - self.NearestEnemyDistance
+                    - immediateSpacingDistance
                 ) / math.max(spacingEnter, 1),
                 0,
                 1
@@ -8451,7 +8619,7 @@ function State:AdaptiveThink(
 
     elseif self.AdaptiveRisk
         > CFG.ADAPTIVE_CAST_RISK_LIMIT
-        and self.NearestEnemyDistance
+        and immediateSpacingDistance
             < adaptiveEnter then
 
         self.AdaptiveCastAllowed = false
@@ -8482,12 +8650,12 @@ function State:AdaptiveThink(
             now
         )
 
-    elseif self.NearestEnemyDistance
+    elseif immediateSpacingDistance
             < adaptiveEnter
         or (
             healthRatio
                 <= CFG.ADAPTIVE_CRITICAL_HEALTH_RATIO
-            and self.NearestEnemyDistance
+            and immediateSpacingDistance
                 < desiredDistance + 4
         ) then
 
@@ -9059,6 +9227,11 @@ local function resetCombatCycle(nextMode)
     State.RouteNavigationMode = "RESPAWN"
     State.NearestEnemy = nil
     State.NearestEnemyDistance = math.huge
+    State.NearestSpacingEnemy = nil
+    State.NearestSpacingDistance = math.huge
+    State.NearestSpacingClear = false
+    State.LastSpacingEnemyUpdate = -math.huge
+    State.SpacingTarget = nil
     State.AdaptivePathActive = false
     State:ResetAdaptiveDirector(
         nextMode or "RESPAWN"
@@ -9260,6 +9433,16 @@ connect(
         if not State.AdaptiveModel then
             State:CurrentEnemySpacingPlan()
         end
+
+        -- Global nearest remains available for target acquisition,
+        -- route planning, and enemy-relative dodge orientation. Only
+        -- this locally verified body may activate personal retreat.
+        State:RefreshNearestSpacingEnemy(
+            root,
+            character,
+            Target,
+            now
+        )
 
         -- Pack-centre targeting is useful for aiming AoE, but dodge
         -- geometry must reference the body that can actually touch
@@ -9973,8 +10156,9 @@ connect(
             combatNavigationPosition
 
         -- Aim may use the middle of a pack, but personal spacing must
-        -- use the nearest physical enemy. A cluster centre can look
-        -- safely distant while one member is touching the player.
+        -- use the nearest local unobstructed enemy. A cluster centre
+        -- can look safely distant while one member is touching the
+        -- player; a body behind a wall must not force a retreat.
         local desiredEnemyDistance,
             spacingEnter,
             spacingExit,
@@ -9982,24 +10166,19 @@ connect(
                 State:CurrentEnemySpacingPlan()
 
         local nearestSpacingRoot =
-            validEnemy(State.NearestEnemy)
-            and State.NearestEnemy:FindFirstChild(
+            validEnemy(State.NearestSpacingEnemy)
+            and State.NearestSpacingEnemy:FindFirstChild(
                 "HumanoidRootPart"
             )
             or nil
-        local spacingDistance = TargetDistance
+        local spacingDistance =
+            nearestSpacingRoot
+            and State.NearestSpacingDistance
+            or math.huge
         local spacingThreatPosition =
-            combatNavigationPosition
-
-        if nearestSpacingRoot
-            and State.NearestEnemyDistance
-                < spacingDistance then
-
-            spacingDistance =
-                State.NearestEnemyDistance
-            spacingThreatPosition =
-                nearestSpacingRoot.Position
-        end
+            nearestSpacingRoot
+            and nearestSpacingRoot.Position
+            or combatNavigationPosition
 
         if State.AdaptiveModel then
             State.SpacingActive =
@@ -11123,7 +11302,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.21-AA",
+                    Version = "V7.22-LS",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -11309,7 +11488,7 @@ local function createInterface()
 
             combatTab:Paragraph({
                 Title = "Split mob / boss spacing",
-                Desc = "Mobs prefer 48 studs and use the nearest physical mob, never the pack centre. Bosses use a separate 70-stud outer ring, never cast closer than 55, and add measured boss size plus a safe AoE probe to spell reach. Boss deaths add 8 up to a 94-stud outer ring.",
+                Desc = "Mobs prefer 48 studs using the nearest local unobstructed body—not a mob behind a wall or in another room. Bosses use a 70-stud outer ring, never cast closer than 55, and add boss size plus a safe AoE probe to spell reach.",
                 Icon = "move-horizontal"
             })
 
@@ -11549,6 +11728,22 @@ local function createInterface()
                         )
                         or "-"
 
+                    local spacingEnemyName =
+                        validEnemy(
+                            State.NearestSpacingEnemy
+                        )
+                        and State.NearestSpacingEnemy.Name
+                        or "NONE"
+
+                    local spacingDistanceText =
+                        State.NearestSpacingDistance
+                            < math.huge
+                        and string.format(
+                            "%.1f",
+                            State.NearestSpacingDistance
+                        )
+                        or "-"
+
                     local dangerNow =
                         ThreatCurrent
                         and string.format(
@@ -11581,8 +11776,12 @@ local function createInterface()
                         .. targetName
                         .. "\nDistance: "
                         .. distanceText
-                        .. " | Nearest physical:"
+                        .. " | Global nearest:"
                         .. nearestDistanceText
+                        .. "\nSpacing threat:"
+                        .. spacingEnemyName
+                        .. " / "
+                        .. spacingDistanceText
                         .. "\nFacing: "
                         .. (
                             FacingOkay
@@ -11824,7 +12023,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.21-AA",
+                "Combat Pilot V7.22-LS",
                 DungeonData.HazardRegistryLoaded
                     and (
                         "Xyneria WindUI loaded with "
@@ -11855,5 +12054,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.21-AA loaded"
+    "Dungeon Quest Combat Pilot V7.22-LS loaded"
 )

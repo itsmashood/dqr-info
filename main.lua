@@ -1,5 +1,5 @@
---// Dungeon Quest Combat Pilot V7.20
---// Build: V7.20-ADAPTIVE-DIRECTOR-TRUE-SPAM-20260905
+--// Dungeon Quest Combat Pilot V7.21
+--// Build: V7.21-AGGRESSIVE-ADAPTIVE-UNSTUCK-20260905
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Global enemyProjectiles hazard registry + safe/context exclusions
 --// PRECAST warning zones + strict no-contact live-hazard envelopes
@@ -14,6 +14,9 @@
 --// Persistent live-target facing through dodge, route, and target refresh gaps
 --// Utility-based Adaptive Director owns movement and spell timing when enabled
 --// True Spam Spells: independent instant Q/E attempts, including while dodging
+--// True Spam survives respawn and never waits for a target, pack, or range gate
+--// Warning casts continue while moving; emergency attacks resume after first dodge
+--// Fast dodge-stall recovery discards blocked points and reverses escape side
 --// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -122,17 +125,20 @@ local CFG = {
     FACING_TARGET_GRACE = 0.30,
     TRUE_SPAM_INPUT_INTERVAL = 0.05,
     ADAPTIVE_THINK_INTERVAL = 1 / 15,
-    ADAPTIVE_DAMAGE_MEMORY = 2.25,
+    ADAPTIVE_FIRST_DODGE_TIME = 0.16,
+    ADAPTIVE_DAMAGE_MEMORY = 1.25,
     ADAPTIVE_DAMAGE_SPIKE_RATIO = 0.012,
-    ADAPTIVE_LOW_HEALTH_RATIO = 0.58,
-    ADAPTIVE_CRITICAL_HEALTH_RATIO = 0.30,
-    ADAPTIVE_DISTANCE_BONUS_MAX = 18,
-    ADAPTIVE_HEALTH_DISTANCE_BONUS = 10,
-    ADAPTIVE_DAMAGE_DISTANCE_BONUS = 8,
+    ADAPTIVE_LOW_HEALTH_RATIO = 0.42,
+    ADAPTIVE_CRITICAL_HEALTH_RATIO = 0.22,
+    ADAPTIVE_DISTANCE_BONUS_MAX = 10,
+    ADAPTIVE_HEALTH_DISTANCE_BONUS = 5,
+    ADAPTIVE_DAMAGE_DISTANCE_BONUS = 5,
     ADAPTIVE_PROGRESS_STEP = 1.5,
     ADAPTIVE_STALL_TIME = 1.10,
     ADAPTIVE_LOCAL_PATH_EXTRA = 7,
-    ADAPTIVE_CAST_RISK_LIMIT = 0.72,
+    ADAPTIVE_CAST_RISK_LIMIT = 0.92,
+    DODGE_PROGRESS_INTERVAL = 0.28,
+    DODGE_PROGRESS_MIN = 0.35,
     COMBAT_DEATH_STREAK_WINDOW = 180,
     BODY_RADIUS = 2.2,
     PREDICT_NEAR = 0.24,
@@ -288,7 +294,8 @@ local oldStates = {
     "DQ_COMBAT_V717",
     "DQ_COMBAT_V718",
     "DQ_COMBAT_V719",
-    "DQ_COMBAT_V720"
+    "DQ_COMBAT_V720",
+    "DQ_COMBAT_V721"
 }
 
 for _, name in ipairs(oldStates) do
@@ -322,7 +329,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V717_RENDER",
     "DQ_COMBAT_V718_RENDER",
     "DQ_COMBAT_V719_RENDER",
-    "DQ_COMBAT_V720_RENDER"
+    "DQ_COMBAT_V720_RENDER",
+    "DQ_COMBAT_V721_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -334,7 +342,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V720_RENDER",
+    RenderName = "DQ_COMBAT_V721_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -358,9 +366,14 @@ local State = {
     AdaptiveLastThinkAt = -math.huge,
     AdaptiveLastHealth = nil,
     AdaptiveLastDamageAt = -math.huge,
+    AdaptiveEmergencySince = nil,
     AdaptiveTrackedTarget = nil,
     AdaptiveBestTargetDistance = math.huge,
     AdaptiveLastProgressAt = -math.huge,
+    DodgeProgressPosition = nil,
+    DodgeProgressAt = -math.huge,
+    DodgeStallChain = 0,
+    DodgeStallRecoveries = 0,
     BossEngagementRange = DESIRED_DISTANCE,
     BossSpaceDistance = FORCE_SPACE_ENTER,
     BossRangeMode = "FALLBACK",
@@ -409,12 +422,18 @@ local State = {
     LastVisibleBossScan = -math.huge,
     ProfileBossNames = {},
     AbilityButtonCache = {},
+    AbilityButtonLastScan = {
+        Q = -math.huge,
+        E = -math.huge
+    },
+    SpellRespawnGeneration = 0,
+    SpellRespawnRebinds = 0,
     AbilityTemplateCache = {},
     LastAITick = -math.huge,
     LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V720 = State
+ENV.DQ_COMBAT_V721 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -445,6 +464,7 @@ pcall(function()
         "DQCombatV718",
         "DQCombatV719",
         "DQCombatV720",
+        "DQCombatV721",
         "XyneriaUI",
         "WindUI"
     }
@@ -2593,7 +2613,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V720_Hazard"
+        "DQ_V721_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -5633,7 +5653,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V720_FacingAttachment"
+        "DQ_V721_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -5644,7 +5664,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V720_Facing"
+        "DQ_V721_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -6905,6 +6925,22 @@ local SpellFlow = (function()
             State.AbilityButtonCache[letter] = nil
         end
 
+        -- A missing mobile ability button used to trigger a full
+        -- PlayerGui descendant scan after almost every spam input.
+        -- Limit only that discovery scan; cached buttons, executor
+        -- input, and VirtualInputManager still run on every attempt.
+        local buttonScanNow = os.clock()
+        local lastButtonScan =
+            State.AbilityButtonLastScan[letter]
+            or -math.huge
+
+        if buttonScanNow - lastButtonScan < 0.75 then
+            return false
+        end
+
+        State.AbilityButtonLastScan[letter] =
+            buttonScanNow
+
         for _, object in ipairs(
             playerGui:GetDescendants()
         ) do
@@ -7279,8 +7315,83 @@ local SpellFlow = (function()
         self.EAttempts = 0
         self.LastUseCheck = -math.huge
         State.AbilityButtonCache = {}
+        State.AbilityButtonLastScan = {
+            Q = -math.huge,
+            E = -math.huge
+        }
 
         refreshAbilityRuntime(true)
+    end
+
+    function flow:RebindAfterRespawn(character)
+        State.SpellRespawnGeneration =
+            (State.SpellRespawnGeneration or 0) + 1
+
+        local generation =
+            State.SpellRespawnGeneration
+
+        task.spawn(function()
+            local root =
+                character:FindFirstChild(
+                    "HumanoidRootPart"
+                )
+                or character:WaitForChild(
+                    "HumanoidRootPart",
+                    10
+                )
+
+            if not root
+                or not State.Alive
+                or LP.Character ~= character
+                or generation
+                    ~= State.SpellRespawnGeneration then
+
+                return
+            end
+
+            -- The first retry makes spam eligible immediately. The
+            -- later retries catch Backpack/abilitySlot and mobile UI
+            -- objects that Dungeon Quest recreates after the body.
+            self.LastQ = -math.huge
+            self.LastE = -math.huge
+            self.LastUseCheck = -math.huge
+            self.KeyBusy = {}
+            self.PairToken = self.PairToken + 1
+            self.PairBusy = false
+
+            local retryDelays = {
+                0,
+                0.20,
+                0.45,
+                0.80,
+                1.20
+            }
+
+            for _, delay in ipairs(retryDelays) do
+                if delay > 0 then
+                    task.wait(delay)
+                end
+
+                if not State.Alive
+                    or LP.Character ~= character
+                    or generation
+                        ~= State.SpellRespawnGeneration then
+
+                    return
+                end
+
+                State.AbilityButtonCache = {}
+                State.AbilityButtonLastScan = {
+                    Q = -math.huge,
+                    E = -math.huge
+                }
+                AbilityRuntime.LastScan = -math.huge
+                refreshAbilityRuntime(true)
+                State.SpellRespawnRebinds =
+                    (State.SpellRespawnRebinds or 0)
+                    + 1
+            end
+        end)
     end
 
     function flow:CastNow(letter)
@@ -7605,26 +7716,28 @@ local SpellFlow = (function()
 
         -- Normal/adaptive casting reserves the first movement
         -- reaction for escape. True Spam deliberately bypasses this
-        -- gate and keeps attempting every ready in-range ability.
+        -- gate and keeps attempting every ready ability.
         if dodgingNow
-            and not State.SpamSpells then
+            and not State.SpamSpells
+            and not (
+                State.AdaptiveModel
+                and State.AdaptiveCastAllowed
+            ) then
 
             return
         end
 
         if State.SpamSpells then
-            if not validEnemy(target) then
-
-                return
-            end
-
             State.PostDodgeCastPending = false
 
+            -- True Spam is deliberately independent from targeting.
+            -- Once the player is alive, ready Q/E are retried even
+            -- while the target list, range estimate, route, or dodge
+            -- state is rebuilding after a death.
             local qReady =
                 AUTO_Q
                 and qAbilityReady
                 and not self.PairBusy
-                and distance <= qRange
                 and now - self.LastQ
                     >= spamInterval
 
@@ -7632,7 +7745,6 @@ local SpellFlow = (function()
                 AUTO_E
                 and eAbilityReady
                 and not self.PairBusy
-                and distance <= eRange
                 and now - self.LastE
                     >= spamInterval
 
@@ -8044,9 +8156,13 @@ function State:ResetAdaptiveDirector(reason)
     self.AdaptiveLastThinkAt = -math.huge
     self.AdaptiveLastHealth = nil
     self.AdaptiveLastDamageAt = -math.huge
+    self.AdaptiveEmergencySince = nil
     self.AdaptiveTrackedTarget = nil
     self.AdaptiveBestTargetDistance = math.huge
     self.AdaptiveLastProgressAt = -math.huge
+    self.DodgeProgressPosition = nil
+    self.DodgeProgressAt = -math.huge
+    self.DodgeStallChain = 0
 end
 
 function State:SetAdaptiveIntent(
@@ -8201,6 +8317,14 @@ function State:AdaptiveThink(
             1
         )
 
+    if level == "EMERGENCY" then
+        if not self.AdaptiveEmergencySince then
+            self.AdaptiveEmergencySince = now
+        end
+    else
+        self.AdaptiveEmergencySince = nil
+    end
+
     if target ~= self.AdaptiveTrackedTarget then
         self.AdaptiveTrackedTarget = target
         self.AdaptiveBestTargetDistance =
@@ -8284,15 +8408,35 @@ function State:AdaptiveThink(
         self.AdaptiveCastAllowed = false
         self.AdaptiveSpellReason = "NO TARGET"
 
-    elseif level == "EMERGENCY"
-        or level == "WARNING" then
+    elseif level == "EMERGENCY" then
+        local firstDodgeComplete =
+            self.AdaptiveEmergencySince
+            and now
+                - self.AdaptiveEmergencySince
+                >= CFG.ADAPTIVE_FIRST_DODGE_TIME
 
         self.AdaptiveCastAllowed =
-            self.PostDodgeCastPending == true
+            firstDodgeComplete
+            and castInRange
+            and FacingOkay
+            or false
+        self.AdaptiveSpellReason =
+            firstDodgeComplete
+            and (
+                self.AdaptiveCastAllowed
+                and "ATTACK WHILE DODGING"
+                or "DODGE / FIND RANGE"
+            )
+            or "FIRST DODGE"
+
+    elseif level == "WARNING" then
+        self.AdaptiveCastAllowed =
+            castInRange
+            and FacingOkay
         self.AdaptiveSpellReason =
             self.AdaptiveCastAllowed
-            and "POST-DODGE WINDOW"
-            or "DODGE FIRST"
+            and "CAST WHILE EVADING"
+            or "EVADE / FIND RANGE"
 
     elseif not FacingOkay then
         self.AdaptiveCastAllowed = false
@@ -8593,6 +8737,137 @@ local function stationaryResetCheck(root)
     return false
 end
 
+function State:RecoverDodgeStall(
+    character,
+    root,
+    enemy,
+    threat,
+    level,
+    now
+)
+    if not threat then
+        self.DodgeProgressPosition = nil
+        self.DodgeProgressAt = now
+        self.DodgeStallChain = 0
+        return false
+    end
+
+    local intended =
+        flat(DesiredDirection)
+
+    if not self.DodgeProgressPosition then
+        self.DodgeProgressPosition =
+            root.Position
+        self.DodgeProgressAt = now
+        return false
+    end
+
+    if now - self.DodgeProgressAt
+        < CFG.DODGE_PROGRESS_INTERVAL then
+
+        return false
+    end
+
+    local moved =
+        (
+            flat(root.Position)
+            - flat(
+                self.DodgeProgressPosition
+            )
+        ).Magnitude
+
+    self.DodgeProgressPosition =
+        root.Position
+    self.DodgeProgressAt = now
+
+    if intended.Magnitude < 0.25
+        or moved >= CFG.DODGE_PROGRESS_MIN then
+
+        self.DodgeStallChain = 0
+        return false
+    end
+
+    self.DodgeStallChain =
+        (self.DodgeStallChain or 0) + 1
+    self.DodgeStallRecoveries =
+        (self.DodgeStallRecoveries or 0)
+        + 1
+
+    DodgePoint = nil
+    EvadePoint = nil
+    CurrentDodgeDirection = nil
+    LastDodgePlan = now
+    LastEvadePlan = now
+    clearPath()
+
+    -- A committed side is useful until a wall blocks it. Once actual
+    -- movement stops, reverse the commitment immediately rather than
+    -- repeatedly steering into the same obstacle.
+    if DodgeSide == "LEFT" then
+        DodgeSide = "RIGHT"
+    elseif DodgeSide == "RIGHT" then
+        DodgeSide = "LEFT"
+    else
+        OrbitSide = -OrbitSide
+        DodgeSide =
+            OrbitSide > 0
+            and "RIGHT"
+            or "LEFT"
+    end
+
+    local fallback =
+        committedLateralFallback(
+            root,
+            enemy,
+            threat
+        )
+
+    if not fallback
+        or fallback.Magnitude < 0.05 then
+
+        fallback =
+            flat(root.CFrame.RightVector)
+            * (
+                DodgeSide == "RIGHT"
+                and 1
+                or -1
+            )
+    end
+
+    if fallback.Magnitude > 0.05 then
+        CurrentDodgeDirection =
+            fallback.Unit
+        DesiredDirection =
+            wallSteer(
+                fallback,
+                root,
+                character
+            )
+    end
+
+    Mode =
+        level == "EMERGENCY"
+        and "DODGE UNSTUCK"
+        or "EVADE UNSTUCK"
+    DesiredSpeed =
+        level == "EMERGENCY"
+        and DODGE_SPEED
+        or EVADE_SPEED
+    DodgeUntil =
+        math.max(
+            DodgeUntil,
+            now + CFG.DODGE_LOCK
+        )
+
+    if self.DodgeStallChain
+        > CFG.STUCK_RESET_LIMIT then
+
+        resetStuckCharacter(root)
+    end
+
+    return true
+end
+
 local function updateRemoteCastMode(
     target,
     distance,
@@ -8745,6 +9020,14 @@ function State:RecordCombatDeath()
 end
 
 local function resetCombatCycle(nextMode)
+    if nextMode == "DEAD" then
+        -- Cancel any delayed ability/UI scans that still belong to
+        -- the character that just died. CharacterAdded starts a new
+        -- generation and performs a clean five-pass rebind.
+        State.SpellRespawnGeneration =
+            (State.SpellRespawnGeneration or 0) + 1
+    end
+
     SpellFlow:Reset()
     State.ProfileRouteFlow:ResetForRespawn()
 
@@ -8844,6 +9127,7 @@ local function bindCharacterLifecycle(character)
 
     BoundCharacters[character] = true
     resetCombatCycle("RESPAWN")
+    SpellFlow:RebindAfterRespawn(character)
 
     task.spawn(function()
         local humanoid =
@@ -9089,6 +9373,17 @@ connect(
             >= CFG.DODGE_SIDE_RELEASE then
 
             DodgeSide = "NONE"
+        end
+
+        if State:RecoverDodgeStall(
+            character,
+            root,
+            dodgeEnemy,
+            threat,
+            level,
+            now
+        ) then
+            return
         end
 
         --------------------------------------------------
@@ -10828,7 +11123,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.20-AD",
+                    Version = "V7.21-AA",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -10972,7 +11267,7 @@ local function createInterface()
 
             combatControls:Toggle({
                 Title = "Spam Spells",
-                Desc = "Instantly retry every ready Q/E in range—even while dodging; attack pairs fire together and buffs stay first",
+                Desc = "Retry every ready Q/E while alive—even after death, without waiting for a target, pack, range, route, or dodge",
                 Value = State.SpamSpells,
                 Flag = "DQSpamSpells",
                 Callback = function(value)
@@ -11466,9 +11761,17 @@ local function createInterface()
                             State.TargetBodyRadius or 0
                         )
                         .. "\nDodge movement:WALK"
+                        .. " | Unstuck:"
+                        .. tostring(
+                            State.DodgeStallRecoveries or 0
+                        )
                         .. " | Post-dodge casts:"
                         .. tostring(
                             State.PostDodgeCastAttempts or 0
+                        )
+                        .. "\nSpell respawn rebinds:"
+                        .. tostring(
+                            State.SpellRespawnRebinds or 0
                         )
                         .. "\nNavigation: "
                         .. (
@@ -11521,7 +11824,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.20-AD",
+                "Combat Pilot V7.21-AA",
                 DungeonData.HazardRegistryLoaded
                     and (
                         "Xyneria WindUI loaded with "
@@ -11552,5 +11855,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.20-AD loaded"
+    "Dungeon Quest Combat Pilot V7.21-AA loaded"
 )

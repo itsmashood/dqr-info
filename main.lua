@@ -1,5 +1,5 @@
---// Dungeon Quest Combat Pilot V7.19
---// Build: V7.19-WALK-DODGE-FACING-LOCK-20260905
+--// Dungeon Quest Combat Pilot V7.20
+--// Build: V7.20-ADAPTIVE-DIRECTOR-TRUE-SPAM-20260905
 --// Safe-gap committed dodge + expanding hazard prediction
 --// Global enemyProjectiles hazard registry + safe/context exclusions
 --// PRECAST warning zones + strict no-contact live-hazard envelopes
@@ -12,6 +12,8 @@
 --// Nearest-body mob spacing + party-safe far-target routing
 --// Walking-only dodge; no teleport, flight, or tween movement
 --// Persistent live-target facing through dodge, route, and target refresh gaps
+--// Utility-based Adaptive Director owns movement and spell timing when enabled
+--// True Spam Spells: independent instant Q/E attempts, including while dodging
 --// Walls-only noclip; floors and platforms remain collidable
 --// Maximum WalkSpeed = 20
 --// Startup-safe hazard scan + corrected Beam tracking
@@ -118,6 +120,19 @@ local CFG = {
     BOSS_CAST_EXIT_OFFSET = 0.75,
     POST_DODGE_CAST_WINDOW = 0.45,
     FACING_TARGET_GRACE = 0.30,
+    TRUE_SPAM_INPUT_INTERVAL = 0.05,
+    ADAPTIVE_THINK_INTERVAL = 1 / 15,
+    ADAPTIVE_DAMAGE_MEMORY = 2.25,
+    ADAPTIVE_DAMAGE_SPIKE_RATIO = 0.012,
+    ADAPTIVE_LOW_HEALTH_RATIO = 0.58,
+    ADAPTIVE_CRITICAL_HEALTH_RATIO = 0.30,
+    ADAPTIVE_DISTANCE_BONUS_MAX = 18,
+    ADAPTIVE_HEALTH_DISTANCE_BONUS = 10,
+    ADAPTIVE_DAMAGE_DISTANCE_BONUS = 8,
+    ADAPTIVE_PROGRESS_STEP = 1.5,
+    ADAPTIVE_STALL_TIME = 1.10,
+    ADAPTIVE_LOCAL_PATH_EXTRA = 7,
+    ADAPTIVE_CAST_RISK_LIMIT = 0.72,
     COMBAT_DEATH_STREAK_WINDOW = 180,
     BODY_RADIUS = 2.2,
     PREDICT_NEAR = 0.24,
@@ -272,7 +287,8 @@ local oldStates = {
     "DQ_COMBAT_V716",
     "DQ_COMBAT_V717",
     "DQ_COMBAT_V718",
-    "DQ_COMBAT_V719"
+    "DQ_COMBAT_V719",
+    "DQ_COMBAT_V720"
 }
 
 for _, name in ipairs(oldStates) do
@@ -305,7 +321,8 @@ local oldRenderNames = {
     "DQ_COMBAT_V716_RENDER",
     "DQ_COMBAT_V717_RENDER",
     "DQ_COMBAT_V718_RENDER",
-    "DQ_COMBAT_V719_RENDER"
+    "DQ_COMBAT_V719_RENDER",
+    "DQ_COMBAT_V720_RENDER"
 }
 
 for _, name in ipairs(oldRenderNames) do
@@ -317,7 +334,7 @@ end
 local State = {
     Alive = true,
     Connections = {},
-    RenderName = "DQ_COMBAT_V719_RENDER",
+    RenderName = "DQ_COMBAT_V720_RENDER",
     OwnAbilityIgnoreUntil = 0,
     SpacingActive = false,
     SpamSpells = true,
@@ -325,6 +342,25 @@ local State = {
     AdaptiveBossRange = true,
     AdaptiveModel = false,
     AdaptivePathActive = false,
+    AdaptiveMovementOwner = false,
+    AdaptiveIntent = "LEGACY",
+    AdaptiveReason = "TOGGLE OFF",
+    AdaptiveSpellReason = "LEGACY",
+    AdaptiveRisk = 0,
+    AdaptiveHealthRatio = 1,
+    AdaptiveDamagePressure = 0,
+    AdaptiveDistanceBonus = 0,
+    AdaptiveCastAllowed = true,
+    AdaptivePathWanted = false,
+    AdaptiveRouteWanted = false,
+    AdaptiveDecisionChanges = 0,
+    AdaptiveLastIntentAt = -math.huge,
+    AdaptiveLastThinkAt = -math.huge,
+    AdaptiveLastHealth = nil,
+    AdaptiveLastDamageAt = -math.huge,
+    AdaptiveTrackedTarget = nil,
+    AdaptiveBestTargetDistance = math.huge,
+    AdaptiveLastProgressAt = -math.huge,
     BossEngagementRange = DESIRED_DISTANCE,
     BossSpaceDistance = FORCE_SPACE_ENTER,
     BossRangeMode = "FALLBACK",
@@ -378,7 +414,7 @@ local State = {
     LastTargetUpdate = -math.huge
 }
 
-ENV.DQ_COMBAT_V719 = State
+ENV.DQ_COMBAT_V720 = State
 
 --------------------------------------------------
 -- CLEAN GUI
@@ -408,6 +444,7 @@ pcall(function()
         "DQCombatV717",
         "DQCombatV718",
         "DQCombatV719",
+        "DQCombatV720",
         "XyneriaUI",
         "WindUI"
     }
@@ -2556,7 +2593,7 @@ local function createVisual(
         )
 
     box.Name =
-        "DQ_V719_Hazard"
+        "DQ_V720_Hazard"
 
     box.Adornee = part
     box.LineThickness = 0.04
@@ -5596,7 +5633,7 @@ local function createFacing(root)
         )
 
     FacingAttachment.Name =
-        "DQ_V719_FacingAttachment"
+        "DQ_V720_FacingAttachment"
 
     FacingAttachment.Parent =
         root
@@ -5607,7 +5644,7 @@ local function createFacing(root)
         )
 
     FacingAlign.Name =
-        "DQ_V719_Facing"
+        "DQ_V720_Facing"
 
     FacingAlign.Mode =
         Enum.OrientationAlignmentMode.
@@ -6416,6 +6453,15 @@ function State:CurrentEnemySpacingPlan()
                 0,
                 CFG.BOSS_DEATH_DISTANCE_MAX
             )
+            + (
+                self.AdaptiveModel
+                and math.clamp(
+                    self.AdaptiveDistanceBonus or 0,
+                    0,
+                    CFG.ADAPTIVE_DISTANCE_BONUS_MAX
+                )
+                or 0
+            )
 
         local readyRange =
             self:BossEffectiveCastRange(
@@ -6519,21 +6565,43 @@ function State:CurrentEnemySpacingPlan()
             0,
             CFG.ENEMY_DEATH_DISTANCE_MAX
         )
+        + (
+            self.AdaptiveModel
+            and math.clamp(
+                self.AdaptiveDistanceBonus or 0,
+                0,
+                CFG.ADAPTIVE_DISTANCE_BONUS_MAX
+            )
+            or 0
+        )
 
     local desiredDistance =
         requestedDistance
+    local spacingCastRange = castRange
+
+    -- The adaptive director waits farther out while attacks are on
+    -- cooldown, then approaches only as far as a currently ready
+    -- offensive ability requires. Legacy mode keeps the equipped-
+    -- range behaviour from V7.19.
+    if self.AdaptiveModel then
+        spacingCastRange =
+            math.min(
+                self:MaximumReadyOffensiveRange(),
+                CFG.MOB_CAST_RANGE_CAP
+            )
+    end
 
     -- Stay inside a usable ranged spell when that spell can already
     -- support the safe baseline. Short-range skills never drag the
     -- character closer than the global minimum enemy distance.
-    if castRange >= CFG.MIN_ENEMY_DISTANCE
+    if spacingCastRange >= CFG.MIN_ENEMY_DISTANCE
             + CFG.ENEMY_CAST_RANGE_BUFFER
-        and castRange < math.huge then
+        and spacingCastRange < math.huge then
 
         desiredDistance =
             math.min(
                 requestedDistance,
-                castRange
+                spacingCastRange
                     - CFG.ENEMY_CAST_RANGE_BUFFER
             )
     end
@@ -6565,7 +6633,7 @@ function State:CurrentEnemySpacingPlan()
     self.EnemySpacingExit =
         spacingExit
     self.EnemySpacingCastRange =
-        castRange
+        spacingCastRange
     self.BossSpacingMode =
         desiredDistance
             < requestedDistance - 0.5
@@ -6620,6 +6688,15 @@ function State:RefreshBossRangePlan()
             self.BossSpacingBonus or 0,
             0,
             CFG.BOSS_DEATH_DISTANCE_MAX
+        )
+        + (
+            self.AdaptiveModel
+            and math.clamp(
+                self.AdaptiveDistanceBonus or 0,
+                0,
+                CFG.ADAPTIVE_DISTANCE_BONUS_MAX
+            )
+            or 0
         )
 
     if not self.TargetIsBoss then
@@ -7089,6 +7166,38 @@ local SpellFlow = (function()
         )
     end
 
+    local function pressBothImmediate()
+        local qKey, qFallback =
+            keyData("Q")
+        local eKey, eFallback =
+            keyData("E")
+
+        if flow.PairBusy
+            or flow.KeyBusy[qKey]
+            or flow.KeyBusy[eKey] then
+
+            return false
+        end
+
+        -- pressKey marks each key busy synchronously before its input
+        -- task starts, so both calls below begin on the same decision
+        -- tick without creating duplicate Q or E input workers.
+        local qAccepted =
+            pressKey(
+                qKey,
+                qFallback,
+                "Q"
+            )
+        local eAccepted =
+            pressKey(
+                eKey,
+                eFallback,
+                "E"
+            )
+
+        return qAccepted or eAccepted
+    end
+
     local function cooldownState(letter)
         local ready, detected =
             currentAbilityReady(letter)
@@ -7288,7 +7397,19 @@ local SpellFlow = (function()
         end
 
         if State.SpamSpells then
-            return "SPAM Q:"
+            return "TRUE SPAM Q:"
+                .. tostring(self.QAttempts)
+                .. " E:"
+                .. tostring(self.EAttempts)
+        end
+
+        if State.AdaptiveModel then
+            return "AI "
+                .. tostring(
+                    State.AdaptiveSpellReason
+                        or "THINK"
+                )
+                .. " Q:"
                 .. tostring(self.QAttempts)
                 .. " E:"
                 .. tostring(self.EAttempts)
@@ -7353,7 +7474,9 @@ local SpellFlow = (function()
             and AUTO_E
             and (qBuff or eBuff)
         local spamInterval =
-            State.TargetIsBoss
+            State.SpamSpells
+            and CFG.TRUE_SPAM_INPUT_INTERVAL
+            or State.TargetIsBoss
             and CFG.BOSS_SPELL_SPAM_INTERVAL
             or SPELL_SPAM_INTERVAL
 
@@ -7389,7 +7512,8 @@ local SpellFlow = (function()
         -- immediately continues/replans the dodge.
         --------------------------------------------------
 
-        if State.PostDodgeCastPending then
+        if State.PostDodgeCastPending
+            and not State.SpamSpells then
             if now > State.PostDodgeCastExpires
                 or not validEnemy(target) then
 
@@ -7479,19 +7603,22 @@ local SpellFlow = (function()
                 or mode:find("EVADE", 1, true) == 1
             )
 
-        -- Do not spam through the first movement reaction. The
-        -- explicit post-dodge request above gets one attack window;
-        -- after that, movement remains dedicated to escaping.
-        if dodgingNow then
+        -- Normal/adaptive casting reserves the first movement
+        -- reaction for escape. True Spam deliberately bypasses this
+        -- gate and keeps attempting every ready in-range ability.
+        if dodgingNow
+            and not State.SpamSpells then
+
             return
         end
 
-        if State.SpamSpells
-            or State.TargetIsBoss then
+        if State.SpamSpells then
             if not validEnemy(target) then
 
                 return
             end
+
+            State.PostDodgeCastPending = false
 
             local qReady =
                 AUTO_Q
@@ -7530,7 +7657,7 @@ local SpellFlow = (function()
             end
 
             if qReady and eReady then
-                if pressBoth() then
+                if pressBothImmediate() then
                     self.LastQ = now
                     self.LastE = now
                     self.QAttempts =
@@ -7557,6 +7684,176 @@ local SpellFlow = (function()
                         State.OwnAbilityIgnoreUntil =
                             now
                             + OWN_BUFF_IGNORE_TIME
+                    end
+                end
+
+                if eReady then
+                    if pressKey(
+                        Enum.KeyCode.E,
+                        0x45,
+                        "E"
+                    ) then
+                        self.LastE = now
+                        self.EAttempts =
+                            self.EAttempts + 1
+                    end
+                end
+            end
+
+            return
+        end
+
+        --------------------------------------------------
+        -- ADAPTIVE SPELL POLICY
+        --
+        -- The director, rather than pack order, decides when to
+        -- attack. Range and live cooldown checks remain hard guards.
+        --------------------------------------------------
+
+        if State.AdaptiveModel then
+            if not State.AdaptiveCastAllowed
+                or not validEnemy(target) then
+
+                return
+            end
+
+            local qReady =
+                AUTO_Q
+                and qAbilityReady
+                and not self.PairBusy
+                and distance <= qRange
+                and now - self.LastQ
+                    >= spamInterval
+
+            local eReady =
+                AUTO_E
+                and eAbilityReady
+                and not self.PairBusy
+                and distance <= eRange
+                and now - self.LastE
+                    >= spamInterval
+
+            if buffPair then
+                if qReady
+                    and eReady
+                    and pressBoth() then
+
+                    self.LastQ = now
+                    self.LastE = now
+                    self.QAttempts =
+                        self.QAttempts + 1
+                    self.EAttempts =
+                        self.EAttempts + 1
+                    State.OwnAbilityIgnoreUntil =
+                        now + OWN_BUFF_IGNORE_TIME
+                end
+
+                return
+            end
+
+            if qReady and eReady then
+                if pressBothImmediate() then
+                    self.LastQ = now
+                    self.LastE = now
+                    self.QAttempts =
+                        self.QAttempts + 1
+                    self.EAttempts =
+                        self.EAttempts + 1
+                    State.OwnAbilityIgnoreUntil =
+                        now + OWN_BUFF_IGNORE_TIME
+                end
+            else
+                if qReady then
+                    if pressKey(
+                        Enum.KeyCode.Q,
+                        0x51,
+                        "Q"
+                    ) then
+                        self.LastQ = now
+                        self.QAttempts =
+                            self.QAttempts + 1
+                        State.OwnAbilityIgnoreUntil =
+                            now + OWN_BUFF_IGNORE_TIME
+                    end
+                end
+
+                if eReady then
+                    if pressKey(
+                        Enum.KeyCode.E,
+                        0x45,
+                        "E"
+                    ) then
+                        self.LastE = now
+                        self.EAttempts =
+                            self.EAttempts + 1
+                    end
+                end
+            end
+
+            return
+        end
+
+        if State.TargetIsBoss then
+            if not validEnemy(target) then
+                return
+            end
+
+            local qReady =
+                AUTO_Q
+                and qAbilityReady
+                and not self.PairBusy
+                and distance <= qRange
+                and now - self.LastQ
+                    >= spamInterval
+            local eReady =
+                AUTO_E
+                and eAbilityReady
+                and not self.PairBusy
+                and distance <= eRange
+                and now - self.LastE
+                    >= spamInterval
+
+            if buffPair then
+                if qReady
+                    and eReady
+                    and pressBoth() then
+
+                    self.LastQ = now
+                    self.LastE = now
+                    self.QAttempts =
+                        self.QAttempts + 1
+                    self.EAttempts =
+                        self.EAttempts + 1
+                    State.OwnAbilityIgnoreUntil =
+                        now + OWN_BUFF_IGNORE_TIME
+                end
+
+                return
+            end
+
+            if qReady and eReady then
+                if pressBothImmediate() then
+                    self.LastQ = now
+                    self.LastE = now
+                    self.QAttempts =
+                        self.QAttempts + 1
+                    self.EAttempts =
+                        self.EAttempts + 1
+                    State.OwnAbilityIgnoreUntil =
+                        now + OWN_BUFF_IGNORE_TIME
+                end
+            else
+                if qReady then
+                    if pressKey(
+                        Enum.KeyCode.Q,
+                        0x51,
+                        "Q"
+                    ) then
+                        self.LastQ = now
+                        self.QAttempts =
+                            self.QAttempts + 1
+                        State.OwnAbilityIgnoreUntil =
+                            now + OWN_BUFF_IGNORE_TIME
                     end
                 end
 
@@ -7726,6 +8023,372 @@ local LastEvadePlan = 0
 local OrbitSide = 1
 
 local BlockedSince = nil
+
+--------------------------------------------------
+-- ADAPTIVE DIRECTOR
+--------------------------------------------------
+
+function State:ResetAdaptiveDirector(reason)
+    self.AdaptiveMovementOwner = false
+    self.AdaptiveIntent = "LEGACY"
+    self.AdaptiveReason =
+        reason or "TOGGLE OFF"
+    self.AdaptiveSpellReason = "LEGACY"
+    self.AdaptiveRisk = 0
+    self.AdaptiveHealthRatio = 1
+    self.AdaptiveDamagePressure = 0
+    self.AdaptiveDistanceBonus = 0
+    self.AdaptiveCastAllowed = true
+    self.AdaptivePathWanted = false
+    self.AdaptiveRouteWanted = false
+    self.AdaptiveLastThinkAt = -math.huge
+    self.AdaptiveLastHealth = nil
+    self.AdaptiveLastDamageAt = -math.huge
+    self.AdaptiveTrackedTarget = nil
+    self.AdaptiveBestTargetDistance = math.huge
+    self.AdaptiveLastProgressAt = -math.huge
+end
+
+function State:SetAdaptiveIntent(
+    intent,
+    reason,
+    now
+)
+    if self.AdaptiveIntent ~= intent then
+        self.AdaptiveDecisionChanges =
+            (self.AdaptiveDecisionChanges or 0)
+            + 1
+        self.AdaptiveLastIntentAt = now
+    end
+
+    self.AdaptiveIntent = intent
+    self.AdaptiveReason = reason
+end
+
+function State:AdaptiveThink(
+    root,
+    humanoid,
+    target,
+    distance,
+    clusterCount,
+    level,
+    now
+)
+    if not self.AdaptiveModel then
+        if self.AdaptiveMovementOwner then
+            self:ResetAdaptiveDirector(
+                "TOGGLE OFF"
+            )
+        end
+
+        return
+    end
+
+    self.AdaptiveMovementOwner = true
+
+    if now - self.AdaptiveLastThinkAt
+        < CFG.ADAPTIVE_THINK_INTERVAL then
+
+        return
+    end
+
+    self.AdaptiveLastThinkAt = now
+
+    local maximumHealth =
+        math.max(
+            tonumber(humanoid.MaxHealth) or 0,
+            1
+        )
+    local currentHealth =
+        math.max(
+            tonumber(humanoid.Health) or 0,
+            0
+        )
+    local healthRatio =
+        math.clamp(
+            currentHealth / maximumHealth,
+            0,
+            1
+        )
+
+    if self.AdaptiveLastHealth
+        and self.AdaptiveLastHealth
+            - currentHealth
+            >= maximumHealth
+                * CFG.ADAPTIVE_DAMAGE_SPIKE_RATIO then
+
+        self.AdaptiveLastDamageAt = now
+    end
+
+    self.AdaptiveLastHealth = currentHealth
+    self.AdaptiveHealthRatio = healthRatio
+
+    local damagePressure =
+        math.clamp(
+            1
+            - (
+                now
+                - (
+                    self.AdaptiveLastDamageAt
+                    or -math.huge
+                )
+            ) / CFG.ADAPTIVE_DAMAGE_MEMORY,
+            0,
+            1
+        )
+    local healthPressure =
+        math.clamp(
+            (
+                CFG.ADAPTIVE_LOW_HEALTH_RATIO
+                - healthRatio
+            ) / math.max(
+                CFG.ADAPTIVE_LOW_HEALTH_RATIO
+                    - CFG.ADAPTIVE_CRITICAL_HEALTH_RATIO,
+                0.01
+            ),
+            0,
+            1
+        )
+
+    self.AdaptiveDamagePressure =
+        damagePressure
+    self.AdaptiveDistanceBonus =
+        math.clamp(
+            healthPressure
+                * CFG.ADAPTIVE_HEALTH_DISTANCE_BONUS
+                + damagePressure
+                    * CFG.ADAPTIVE_DAMAGE_DISTANCE_BONUS,
+            0,
+            CFG.ADAPTIVE_DISTANCE_BONUS_MAX
+        )
+
+    local hazardRisk =
+        level == "EMERGENCY"
+        and 1
+        or level == "WARNING"
+            and 0.72
+        or 0
+    local proximityRisk = 0
+    local spacingEnter =
+        self.EnemySpacingEnter
+        or FORCE_SPACE_ENTER
+
+    if self.NearestEnemyDistance
+        < math.huge
+        and self.NearestEnemyDistance
+            < spacingEnter then
+
+        proximityRisk =
+            math.clamp(
+                (
+                    spacingEnter
+                    - self.NearestEnemyDistance
+                ) / math.max(spacingEnter, 1),
+                0,
+                1
+            )
+    end
+
+    self.AdaptiveRisk =
+        math.clamp(
+            math.max(
+                hazardRisk,
+                proximityRisk * 0.80
+            )
+                + healthPressure * 0.12
+                + damagePressure * 0.18,
+            0,
+            1
+        )
+
+    if target ~= self.AdaptiveTrackedTarget then
+        self.AdaptiveTrackedTarget = target
+        self.AdaptiveBestTargetDistance =
+            distance or math.huge
+        self.AdaptiveLastProgressAt = now
+
+    elseif validEnemy(target)
+        and distance
+        and distance < math.huge then
+
+        if distance
+            <= self.AdaptiveBestTargetDistance
+                - CFG.ADAPTIVE_PROGRESS_STEP then
+
+            self.AdaptiveBestTargetDistance =
+                distance
+            self.AdaptiveLastProgressAt = now
+
+        elseif distance
+            < self.AdaptiveBestTargetDistance then
+
+            self.AdaptiveBestTargetDistance =
+                distance
+        end
+    end
+
+    local desiredDistance,
+        adaptiveEnter,
+        _,
+        movementStopDistance =
+            self:CurrentEnemySpacingPlan()
+    local stalled =
+        validEnemy(target)
+        and distance > movementStopDistance + 1
+        and now - self.AdaptiveLastProgressAt
+            >= CFG.ADAPTIVE_STALL_TIME
+
+    self.AdaptivePathWanted =
+        validEnemy(target)
+        and (
+            stalled
+            or distance
+                > math.max(
+                    CFG.ROUTE_TARGET_DISTANCE,
+                    movementStopDistance
+                        + CFG.ADAPTIVE_LOCAL_PATH_EXTRA
+                )
+        )
+    self.AdaptiveRouteWanted =
+        not validEnemy(target)
+        or self.AdaptivePathWanted
+
+    local readyRange =
+        self:MaximumReadyOffensiveRange()
+
+    if self.TargetIsBoss then
+        readyRange =
+            self:BossEffectiveCastRange(
+                readyRange
+            )
+    else
+        readyRange =
+            math.min(
+                readyRange,
+                CFG.MOB_CAST_RANGE_CAP
+            )
+    end
+
+    local castInRange =
+        validEnemy(target)
+        and readyRange > 0
+        and distance <= readyRange
+
+    if self.SpamSpells then
+        self.AdaptiveCastAllowed =
+            validEnemy(target)
+        self.AdaptiveSpellReason =
+            "TRUE SPAM OVERRIDE"
+
+    elseif not validEnemy(target) then
+        self.AdaptiveCastAllowed = false
+        self.AdaptiveSpellReason = "NO TARGET"
+
+    elseif level == "EMERGENCY"
+        or level == "WARNING" then
+
+        self.AdaptiveCastAllowed =
+            self.PostDodgeCastPending == true
+        self.AdaptiveSpellReason =
+            self.AdaptiveCastAllowed
+            and "POST-DODGE WINDOW"
+            or "DODGE FIRST"
+
+    elseif not FacingOkay then
+        self.AdaptiveCastAllowed = false
+        self.AdaptiveSpellReason = "TURNING"
+
+    elseif not castInRange then
+        self.AdaptiveCastAllowed = false
+        self.AdaptiveSpellReason =
+            readyRange > 0
+            and "CLOSE TO CAST"
+            or "COOLDOWN"
+
+    elseif self.AdaptiveRisk
+        > CFG.ADAPTIVE_CAST_RISK_LIMIT
+        and self.NearestEnemyDistance
+            < adaptiveEnter then
+
+        self.AdaptiveCastAllowed = false
+        self.AdaptiveSpellReason = "CREATE SPACE"
+    else
+        self.AdaptiveCastAllowed = true
+        self.AdaptiveSpellReason = "CAST NOW"
+    end
+
+    if level == "EMERGENCY" then
+        self:SetAdaptiveIntent(
+            "DODGE",
+            "LIVE HAZARD",
+            now
+        )
+
+    elseif level == "WARNING" then
+        self:SetAdaptiveIntent(
+            "EVADE",
+            "PRECAST / PREDICTED HAZARD",
+            now
+        )
+
+    elseif not validEnemy(target) then
+        self:SetAdaptiveIntent(
+            "ADVANCE",
+            "FOLLOW DUNGEON ROUTE",
+            now
+        )
+
+    elseif self.NearestEnemyDistance
+            < adaptiveEnter
+        or (
+            healthRatio
+                <= CFG.ADAPTIVE_CRITICAL_HEALTH_RATIO
+            and self.NearestEnemyDistance
+                < desiredDistance + 4
+        ) then
+
+        self:SetAdaptiveIntent(
+            "RETREAT",
+            damagePressure > 0
+            and "DAMAGE PRESSURE"
+            or "ENEMY TOO CLOSE",
+            now
+        )
+
+    elseif castInRange
+        and self.AdaptiveCastAllowed then
+
+        self:SetAdaptiveIntent(
+            "CAST",
+            clusterCount and clusterCount > 1
+            and "AOE PACK CENTRE"
+            or "ABILITY IN RANGE",
+            now
+        )
+
+    elseif self.AdaptivePathWanted then
+        self:SetAdaptiveIntent(
+            "PATH",
+            stalled
+            and "NO APPROACH PROGRESS"
+            or "DISTANT TARGET",
+            now
+        )
+
+    elseif distance > movementStopDistance then
+        self:SetAdaptiveIntent(
+            "APPROACH",
+            self.AdaptiveSpellReason,
+            now
+        )
+    else
+        self:SetAdaptiveIntent(
+            "ORBIT",
+            self.AdaptiveSpellReason,
+            now
+        )
+    end
+end
 
 --------------------------------------------------
 -- STUCK
@@ -8114,6 +8777,9 @@ local function resetCombatCycle(nextMode)
     State.NearestEnemy = nil
     State.NearestEnemyDistance = math.huge
     State.AdaptivePathActive = false
+    State:ResetAdaptiveDirector(
+        nextMode or "RESPAWN"
+    )
     State.BossEngagementRange =
         math.max(
             DESIRED_DISTANCE,
@@ -8306,7 +8972,10 @@ connect(
             or 0
 
         State:RefreshBossRangePlan()
-        State:CurrentEnemySpacingPlan()
+
+        if not State.AdaptiveModel then
+            State:CurrentEnemySpacingPlan()
+        end
 
         -- Pack-centre targeting is useful for aiming AoE, but dodge
         -- geometry must reference the body that can actually touch
@@ -8372,6 +9041,16 @@ connect(
 
         ThreatFuture =
             futureDistance
+
+        State:AdaptiveThink(
+            root,
+            humanoid,
+            Target,
+            TargetDistance,
+            TargetClusterCount,
+            level,
+            now
+        )
 
         SpellFlow:Observe(
             Target,
@@ -8784,7 +9463,8 @@ connect(
         -- PACK CLEARED: WAIT FOR Q/E TO BE READY
         --------------------------------------------------
 
-        if SpellFlow:ShouldHold() then
+        if not State.AdaptiveModel
+            and SpellFlow:ShouldHold() then
             Mode = "COOLDOWN"
             DesiredSpeed = 0
             DesiredDirection = Vector3.zero
@@ -8804,7 +9484,12 @@ connect(
         --------------------------------------------------
 
         if RemoteCastMode
-            and validEnemy(Target) then
+            and validEnemy(Target)
+            and (
+                not State.AdaptiveModel
+                or State.AdaptiveIntent
+                    == "CAST"
+            ) then
 
             Mode = "RANGED"
             DesiredSpeed = 0
@@ -8835,11 +9520,9 @@ connect(
             -- consulted when combat is clear; attacking and every
             -- dodge branch above retain completely free movement.
             local routePoint =
-                not State.AdaptiveModel
-                and State.ProfileRouteFlow:ProgressPoint(
+                State.ProfileRouteFlow:ProgressPoint(
                     root.Position
                 )
-                or nil
 
             local room = nil
             local point = routePoint
@@ -8869,11 +9552,19 @@ connect(
 
             if point then
                 State.RouteNavigationMode =
-                    routePoint
+                    State.AdaptiveModel
+                    and (
+                        routePoint
+                        and "ADAPTIVE RECORDED ROUTE"
+                        or "ADAPTIVE ROOM FALLBACK"
+                    )
+                    or routePoint
                     and "RECORDED PROGRESS"
                     or "ROOM FALLBACK"
                 Mode =
-                    routePoint
+                    State.AdaptiveModel
+                    and "ADAPT ADVANCE"
+                    or routePoint
                     and "ROUTE"
                     or "NEXT ROOM"
 
@@ -9015,23 +9706,50 @@ connect(
                 nearestSpacingRoot.Position
         end
 
-        if spacingDistance < spacingEnter then
-            State.SpacingActive = true
-        elseif spacingDistance >= spacingExit then
-            State.SpacingActive = false
+        if State.AdaptiveModel then
+            State.SpacingActive =
+                State.AdaptiveIntent
+                    == "RETREAT"
+                or spacingDistance
+                    < spacingEnter
+        else
+            if spacingDistance < spacingEnter then
+                State.SpacingActive = true
+            elseif spacingDistance >= spacingExit then
+                State.SpacingActive = false
+            end
         end
 
         local needsApproach =
             not State.SpacingActive
-            and TargetDistance
-            > movementStopDistance + 0.5
+            and (
+                State.AdaptiveModel
+                and (
+                    State.AdaptiveIntent
+                        == "APPROACH"
+                    or State.AdaptiveIntent
+                        == "PATH"
+                )
+                or (
+                    not State.AdaptiveModel
+                    and TargetDistance
+                        > movementStopDistance + 0.5
+                )
+            )
         local farTarget =
             needsApproach
-            and TargetDistance
-                > math.max(
-                    CFG.ROUTE_TARGET_DISTANCE,
-                    movementStopDistance + 8
+            and (
+                State.AdaptiveModel
+                and State.AdaptivePathWanted
+                or (
+                    not State.AdaptiveModel
+                    and TargetDistance
+                        > math.max(
+                            CFG.ROUTE_TARGET_DISTANCE,
+                            movementStopDistance + 8
+                        )
                 )
+            )
 
         State.RouteGuidedTarget = false
         State.AdaptivePathActive = false
@@ -9323,7 +10041,9 @@ connect(
         if State.SpacingActive then
 
             Mode =
-                State.TargetIsBoss
+                State.AdaptiveModel
+                and "ADAPT RETREAT"
+                or State.TargetIsBoss
                 and "BOSS RETREAT"
                 or "SPACE"
             DesiredSpeed = SPACE_SPEED
@@ -9359,11 +10079,29 @@ connect(
         -- CHASE
         --------------------------------------------------
 
-        elseif TargetDistance
-            > movementStopDistance then
+        elseif (
+            State.AdaptiveModel
+            and (
+                State.AdaptiveIntent
+                    == "APPROACH"
+                or State.AdaptiveIntent
+                    == "PATH"
+            )
+        )
+            or (
+                not State.AdaptiveModel
+                and TargetDistance
+                    > movementStopDistance
+            ) then
 
             Mode =
-                State.RouteGuidedTarget
+                State.AdaptiveModel
+                and (
+                    State.RouteGuidedTarget
+                    and "ADAPT ROUTE"
+                    or "ADAPT APPROACH"
+                )
+                or State.RouteGuidedTarget
                 and (
                     State.TargetIsBoss
                     and "BOSS ROUTE"
@@ -9387,7 +10125,14 @@ connect(
 
         else
             Mode =
-                State.TargetIsBoss
+                State.AdaptiveModel
+                and (
+                    State.AdaptiveIntent
+                        == "CAST"
+                    and "ADAPT CAST"
+                    or "ADAPT ORBIT"
+                )
+                or State.TargetIsBoss
                 and "BOSS RANGE"
                 or "ORBIT"
             DesiredSpeed = ORBIT_SPEED
@@ -10083,7 +10828,7 @@ local function createInterface()
                 XyneriaUI:CreateWindow({
                     Title = "DUNGEON QUEST",
                     Author = "XYNERIA",
-                    Version = "V7.19-WF",
+                    Version = "V7.20-AD",
                     Live = true,
                     StatusTitle = "COMBAT PILOT",
                     Folder = "Xyneria_DungeonQuest",
@@ -10187,12 +10932,17 @@ local function createInterface()
 
             combatControls:Toggle({
                 Title = "Adaptive Model",
-                Desc = "Use live pathfinding when a recorded far-target route is unavailable; dodging still overrides it",
+                Desc = "Utility AI owns walking, spacing, path choice and spell timing; hazards remain highest priority",
                 Value = State.AdaptiveModel,
                 Flag = "DQAdaptiveModel",
                 Callback = function(value)
                     State.AdaptiveModel =
                         value ~= false
+                    State:ResetAdaptiveDirector(
+                        State.AdaptiveModel
+                        and "INITIALIZING"
+                        or "TOGGLE OFF"
+                    )
                     State.AdaptivePathActive = false
                     clearPath()
                 end
@@ -10222,12 +10972,16 @@ local function createInterface()
 
             combatControls:Toggle({
                 Title = "Spam Spells",
-                Desc = "Repeat Q/E near enemies; buffs always cast first",
+                Desc = "Instantly retry every ready Q/E in range—even while dodging; attack pairs fire together and buffs stay first",
                 Value = State.SpamSpells,
                 Flag = "DQSpamSpells",
                 Callback = function(value)
                     State.SpamSpells =
                         value ~= false
+
+                    if State.SpamSpells then
+                        State.PostDodgeCastPending = false
+                    end
                 end
             })
 
@@ -10563,6 +11317,42 @@ local function createInterface()
                         .. dangerNow
                         .. " / "
                         .. dangerFuture
+                        .. "\nAdaptive:"
+                        .. (
+                            State.AdaptiveModel
+                            and "ON/"
+                                .. tostring(
+                                    State.AdaptiveIntent
+                                        or "THINK"
+                                )
+                            or "OFF/LEGACY"
+                        )
+                        .. " | Risk:"
+                        .. string.format(
+                            "%.2f",
+                            State.AdaptiveRisk or 0
+                        )
+                        .. " | HP:"
+                        .. string.format(
+                            "%.0f%%",
+                            (State.AdaptiveHealthRatio or 1)
+                                * 100
+                        )
+                        .. " | Safety:+"
+                        .. string.format(
+                            "%.1f",
+                            State.AdaptiveDistanceBonus or 0
+                        )
+                        .. "\nAI reason:"
+                        .. tostring(
+                            State.AdaptiveReason
+                                or "LEGACY"
+                        )
+                        .. " | Spell:"
+                        .. tostring(
+                            State.AdaptiveSpellReason
+                                or "LEGACY"
+                        )
                         .. "\nDodge side: "
                         .. DodgeSide
                         .. " | Expand:"
@@ -10731,7 +11521,7 @@ local function createInterface()
             )
 
             app:Notify(
-                "Combat Pilot V7.19-WF",
+                "Combat Pilot V7.20-AD",
                 DungeonData.HazardRegistryLoaded
                     and (
                         "Xyneria WindUI loaded with "
@@ -10762,5 +11552,5 @@ end
 createInterface()
 
 print(
-    "Dungeon Quest Combat Pilot V7.19-WF loaded"
+    "Dungeon Quest Combat Pilot V7.20-AD loaded"
 )

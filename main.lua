@@ -46,6 +46,8 @@ local AUTO_E = true
 local AUTO_START = false
 local AUTO_REPLAY = false
 local AUTO_LOBBY = false
+local BACK_TO_LOBBY_AFTER = 5
+local REPLAY_COUNT = tonumber(ENV.DQ_REPLAY_COUNT) or 0
 
 local MAX_SPEED = 20
 
@@ -478,6 +480,7 @@ pcall(function()
         "DQCombatV720",
         "DQCombatV721",
         "DQCombatV722",
+        "XyneriaDQR",
         "XyneriaUI",
         "WindUI"
     }
@@ -11245,12 +11248,18 @@ connect(
             return
         end
 
-        local action =
-            AUTO_LOBBY
-            and "LOBBY"
-            or AUTO_REPLAY
-                and "REPLAY"
-                or nil
+        local action = nil
+
+        if AUTO_LOBBY
+            and (
+                not AUTO_REPLAY
+                or REPLAY_COUNT >= BACK_TO_LOBBY_AFTER
+            ) then
+
+            action = "LOBBY"
+        elseif AUTO_REPLAY then
+            action = "REPLAY"
+        end
 
         if not action then
             return
@@ -11260,6 +11269,14 @@ connect(
 
         if triggerGameAction(action) then
             PostRunActionTaken = true
+
+            if action == "REPLAY" then
+                REPLAY_COUNT = REPLAY_COUNT + 1
+            elseif action == "LOBBY" then
+                REPLAY_COUNT = 0
+            end
+
+            ENV.DQ_REPLAY_COUNT = REPLAY_COUNT
         end
     end
 )
@@ -12051,8 +12068,294 @@ local function createInterface()
     end
 end
 
-createInterface()
+local function createReaperInterface()
+    local guiUrl =
+        tostring(DUNGEON_PROFILE_BASE_URL):gsub("/+$", "")
+        .. "/Xyneria_Reaper_GUI.lua?cache="
+        .. tostring(os.time())
+
+    local source = game:HttpGet(guiUrl)
+    local compile, compileError = loadstring(source)
+
+    if not compile then
+        error(
+            "Xyneria_Reaper_GUI compile error: "
+            .. tostring(compileError)
+        )
+    end
+
+    local createGui = compile()
+
+    if type(createGui) ~= "function" then
+        error(
+            "Xyneria_Reaper_GUI.lua must return a function"
+        )
+    end
+
+    local dungeons = {
+        "Egg Island",
+        "Desert Temple",
+        "Winter Outpost",
+        "Pirate Island",
+        "King's Castle",
+        "The Underworld",
+        "Samurai Palace",
+        "The Canals",
+        "Ghastly Harbor",
+        "Steampunk Sewers",
+        "Orbital Outpost",
+        "Volcanic Chambers",
+        "Aquatic Temple",
+        "Enchanted Forest",
+        "Northern Lands",
+        "Gilded Skies"
+    }
+
+    local api = {
+        Title = "Xyneria (Made by Radia)",
+        Subtitle = DungeonData.Loaded
+            and (
+                "Dungeon Quest ("
+                .. tostring(DungeonData.Name)
+                .. ")"
+            )
+            or "Dungeon Quest (Lobby)",
+        CurrentDungeon = DungeonData.Name,
+        Dungeons = dungeons,
+        Difficulties = {
+            "Insane",
+            "Nightmare"
+        },
+        MinimumAttackRange = CFG.MIN_ENEMY_DISTANCE,
+        Supported = {
+            AutoFarm = true,
+            AutoSkills = true,
+            AttackRange = true,
+            SpamSpells = true,
+            AutoStart = true,
+            AutoReplay = true,
+            AutoBackLobby = true,
+            BackToLobbyAfter = true,
+            WallsNoclip = true,
+            AdaptiveModel = true,
+            AdaptiveBossRange = true
+        },
+        Initial = {
+            AutoFarm = ENABLED,
+            AutoSkills = AUTO_Q or AUTO_E,
+            AttackRange = DESIRED_DISTANCE,
+            SpamSpells = State.SpamSpells,
+            AutoStart = AUTO_START,
+            AutoReplay = AUTO_REPLAY,
+            AutoBackLobby = AUTO_LOBBY,
+            BackToLobbyAfter = BACK_TO_LOBBY_AFTER,
+            ReplayCount = REPLAY_COUNT,
+            WallsNoclip = State.WallNoclip,
+            AdaptiveModel = State.AdaptiveModel,
+            AdaptiveBossRange = State.AdaptiveBossRange,
+            Dungeon = DungeonData.Loaded
+                and DungeonData.Name
+                or "Desert Temple",
+            Difficulty = "Nightmare"
+        }
+    }
+
+    function api.Set(key, value)
+        if key == "AutoFarm" then
+            ENABLED = value ~= false
+
+            if not ENABLED then
+                DesiredDirection = Vector3.zero
+                clearPath()
+            end
+        elseif key == "AutoSkills" then
+            AUTO_Q = value ~= false
+            AUTO_E = value ~= false
+        elseif key == "AttackRange" then
+            local distance =
+                math.clamp(
+                    tonumber(value) or DESIRED_DISTANCE,
+                    CFG.MIN_ENEMY_DISTANCE,
+                    80
+                )
+
+            DESIRED_DISTANCE = distance
+            FORCE_SPACE_ENTER =
+                math.max(
+                    4,
+                    distance
+                        - CFG.MOB_SPACING_ENTER_OFFSET
+                )
+            FORCE_SPACE_EXIT =
+                math.max(
+                    FORCE_SPACE_ENTER + 1,
+                    distance
+                        - CFG.MOB_SPACING_EXIT_OFFSET
+                )
+
+            State.EnemySpacingBonus = 0
+            State:RefreshBossRangePlan()
+            clearPath()
+        elseif key == "SpamSpells" then
+            State.SpamSpells = value ~= false
+
+            if State.SpamSpells then
+                State.PostDodgeCastPending = false
+            end
+        elseif key == "AutoStart" then
+            AUTO_START = value == true
+        elseif key == "AutoReplay" then
+            AUTO_REPLAY = value == true
+        elseif key == "AutoBackLobby" then
+            AUTO_LOBBY = value == true
+        elseif key == "BackToLobbyAfter" then
+            BACK_TO_LOBBY_AFTER =
+                math.clamp(
+                    math.floor(
+                        tonumber(value)
+                        or BACK_TO_LOBBY_AFTER
+                    ),
+                    1,
+                    30
+                )
+        elseif key == "WallsNoclip" then
+            State.WallNoclip = value ~= false
+
+            if not State.WallNoclip then
+                State:RestoreWalls()
+            end
+        elseif key == "AdaptiveModel" then
+            State.AdaptiveModel = value ~= false
+            State:ResetAdaptiveDirector(
+                State.AdaptiveModel
+                and "INITIALIZING"
+                or "TOGGLE OFF"
+            )
+            State.AdaptivePathActive = false
+            clearPath()
+        elseif key == "AdaptiveBossRange" then
+            State.AdaptiveBossRange = value ~= false
+            State:RefreshBossRangePlan()
+            clearPath()
+        else
+            return false,
+                "The game remote for this control is not mapped yet."
+        end
+
+        return true
+    end
+
+    function api.Action(name, payload)
+        if name == "CastBoth" then
+            SpellFlow:CastBothNow()
+            return true
+        elseif name == "CastQ" then
+            SpellFlow:CastNow("Q")
+            return true
+        elseif name == "CastE" then
+            SpellFlow:CastNow("E")
+            return true
+        elseif name == "Start" then
+            return triggerGameAction("START"),
+                "The Start button was not found."
+        elseif name == "Replay" then
+            return triggerGameAction("REPLAY"),
+                "The Replay button was not found."
+        elseif name == "Lobby" then
+            return triggerGameAction("LOBBY"),
+                "The Lobby button was not found."
+        end
+
+        return false,
+            "The game remote for this button is not mapped yet."
+    end
+
+    function api.GetStatus()
+        local hazardCount = 0
+        local enemyCount = 0
+
+        for _ in pairs(Hazards) do
+            hazardCount = hazardCount + 1
+        end
+
+        for enemy in pairs(Enemies) do
+            if validEnemy(enemy) then
+                enemyCount = enemyCount + 1
+            end
+        end
+
+        local targetName =
+            Target
+            and Target.Name
+            or "NONE"
+
+        local distanceText =
+            TargetDistance < math.huge
+            and string.format(
+                "%.1f",
+                TargetDistance
+            )
+            or "-"
+
+        local pathText =
+            Waypoints
+            and (
+                tostring(WaypointIndex)
+                .. "/"
+                .. tostring(#Waypoints)
+            )
+            or "NO"
+
+        return {
+            Subtitle = DungeonData.Loaded
+                and (
+                    "Dungeon Quest ("
+                    .. tostring(DungeonData.Name)
+                    .. ")"
+                )
+                or "Dungeon Quest (Lobby)",
+            Mode = Mode,
+            Target = targetName,
+            Distance = distanceText,
+            Enemies = enemyCount,
+            Hazards = hazardCount,
+            Path = pathText,
+            Route =
+                tostring(State.RouteIndex or 0)
+                .. "/"
+                .. tostring(State.RouteCount or 0),
+            Profile = DungeonData.Name,
+            ReplayCount = REPLAY_COUNT,
+            Completed = visibleCompletionSignal()
+        }
+    end
+
+    local interface = createGui(api)
+
+    if not interface then
+        error(
+            "Xyneria_Reaper_GUI returned no interface"
+        )
+    end
+
+    State.Interface = interface
+    return interface
+end
+
+local interfaceLoaded, reaperError =
+    pcall(createReaperInterface)
+
+if not interfaceLoaded then
+    if warn then
+        warn(
+            "Reaper-style GUI unavailable; loading WindUI fallback: "
+            .. tostring(reaperError)
+        )
+    end
+
+    createInterface()
+end
 
 print(
-    "Dungeon Quest Combat Pilot V7.22-LS loaded"
+    "Dungeon Quest Combat Pilot V7.23-ReaperUI loaded"
 )

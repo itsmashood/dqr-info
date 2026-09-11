@@ -9,22 +9,7 @@ local AbilityScanner = {}
 
 local function getAbilitiesFolder()
 
-    local folder =
-        ReplicatedStorage:FindFirstChild("abilities")
-
-
-    if not folder then
-
-        warn(
-            "AbilityScanner: ReplicatedStorage.abilities missing"
-        )
-
-        return nil
-
-    end
-
-
-    return folder
+    return ReplicatedStorage:FindFirstChild("abilities")
 
 end
 
@@ -32,12 +17,9 @@ end
 
 
 
-local function getAbilityFromImage(imageId)
+local function findAbility(image)
 
-
-    local folder =
-        getAbilitiesFolder()
-
+    local folder = getAbilitiesFolder()
 
     if not folder then
         return nil
@@ -52,7 +34,7 @@ local function getAbilityFromImage(imageId)
             ability:FindFirstChild("imageId")
 
 
-        if img and img.Value == imageId then
+        if img and img.Value == image then
 
             return ability
 
@@ -70,7 +52,8 @@ end
 
 
 
-local function readSlot(slotName, gui)
+
+local function scanSlot(name,gui)
 
 
     if not gui then
@@ -85,27 +68,19 @@ local function readSlot(slotName, gui)
 
 
     if not image then
-
         return nil
-
     end
-
 
 
 
     local ability =
-        getAbilityFromImage(
-            image.Value
-        )
+        findAbility(image.Value)
 
 
 
     if not ability then
-
         return nil
-
     end
-
 
 
 
@@ -117,19 +92,14 @@ local function readSlot(slotName, gui)
 
 
     if cd then
-
-        cooldown =
-            cd.Value
-
+        cooldown = cd.Value
     end
-
-
 
 
 
     return {
 
-        Slot = slotName,
+        Slot = name,
 
         Name = ability.Name,
 
@@ -138,6 +108,7 @@ local function readSlot(slotName, gui)
         Cooldown = cooldown
 
     }
+
 
 end
 
@@ -157,12 +128,10 @@ function AbilityScanner:GetEquipped()
         player:FindFirstChild("PlayerGui")
 
 
+
     if not gui then
-
         return results
-
     end
-
 
 
 
@@ -170,42 +139,21 @@ function AbilityScanner:GetEquipped()
         gui:FindFirstChild("inventory")
 
 
+
     if not inventory then
-
-        warn(
-            "AbilityScanner: inventory missing"
-        )
-
-        return results
-
-    end
-
-
-
-
-
-    local main =
-        inventory:FindFirstChild("mainBackground")
-
-
-    if not main then
-        return results
-    end
-
-
-
-    local inner =
-        main:FindFirstChild("innerBackground")
-
-
-    if not inner then
         return results
     end
 
 
 
     local left =
-        inner:FindFirstChild("leftSideFrame")
+        inventory
+        :FindFirstChild("mainBackground")
+        and inventory.mainBackground
+        :FindFirstChild("innerBackground")
+        and inventory.mainBackground.innerBackground
+        :FindFirstChild("leftSideFrame")
+
 
 
     if not left then
@@ -217,19 +165,15 @@ function AbilityScanner:GetEquipped()
 
     local slots = {
 
-        {
-            Name = "q",
-            Gui = left:FindFirstChild("qAbility")
-        },
+        {"q", left:FindFirstChild("qAbility")},
 
+        {"e", left:FindFirstChild("eAbility")},
 
-        {
-            Name = "e",
-            Gui = left:FindFirstChild("eAbility")
-        }
+        {"q2", left:FindFirstChild("qAbility2")},
+
+        {"e2", left:FindFirstChild("eAbility2")}
 
     }
-
 
 
 
@@ -238,10 +182,11 @@ function AbilityScanner:GetEquipped()
 
 
         local data =
-            readSlot(
-                slot.Name,
-                slot.Gui
+            scanSlot(
+                slot[1],
+                slot[2]
             )
+
 
 
         if data then
@@ -262,8 +207,6 @@ function AbilityScanner:GetEquipped()
     return results
 
 end
-
-
 
 
 

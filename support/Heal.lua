@@ -1,99 +1,22 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local Heal={}
+local cd={}
+local names={Universal=true}
 
-local Heal = {}
-
-
-local healingAbilities = {
-
-    ["Universal Heal"] = true,
-    ["Chain Heal"] = true,
-    ["Rejuvenating Spray"] = true,
-    ["Life Pulse"] = true,
-    ["Aura of Life"] = true,
-    ["Revitalize"] = true,
-    ["Guardian's Blessing"] = true,
-    ["Innervate"] = true
-
-}
-
-
-
-local cooldowns = {}
-
-
-
-function Heal:IsHealingAbility(ability)
-
-    return healingAbilities[ability.Name] == true
-
+local function isHeal(n)
+    return n:find("Heal") or n=="Life Pulse" or n=="Aura of Life" or n=="Revitalize" or n=="Rejuvenating Spray"
 end
 
-
-
-function Heal:GetBestHeal(abilities)
-
-    for _,ability in ipairs(abilities) do
-
-        if self:IsHealingAbility(ability) then
-
-            return ability
-
+function Heal:TryHeal(scanner)
+    local abilities=scanner:GetEquipped()
+    for _,a in ipairs(abilities) do
+        if isHeal(a.Name) then
+            if not cd[a.Name] or os.clock()-cd[a.Name]>=a.Cooldown then
+                ReplicatedStorage.remotes.abilityUsed:FireServer(a.Slot,a.Name)
+                cd[a.Name]=os.clock()
+                return true
+            end
         end
-
     end
-
-    return nil
-
 end
-
-
-
-function Heal:CanCast(ability)
-
-    local last =
-        cooldowns[ability.Name]
-        or 0
-
-
-    local now =
-        os.clock()
-
-
-    return (
-        now - last
-    ) >= ability.Cooldown
-
-end
-
-
-
-function Heal:Cast(ability)
-
-    if not self:CanCast(ability) then
-        return false
-    end
-
-
-    local remote =
-        ReplicatedStorage
-        .remotes
-        .abilityUsed
-
-
-    remote:FireServer(
-        ability.Slot,
-        ability.Name
-    )
-
-
-    cooldowns[ability.Name] =
-        os.clock()
-
-
-    return true
-
-end
-
-
-
 return Heal

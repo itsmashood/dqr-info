@@ -1,7 +1,9 @@
 local UI = {}
 
 local Players = game:GetService("Players")
-local CoreGui = game:GetService("CoreGui")
+
+local WIND_URL =
+    "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
 
 
 function UI:Create()
@@ -9,158 +11,233 @@ function UI:Create()
     local State = self.State
 
 
-    pcall(function()
-        local old = CoreGui:FindFirstChild("DQSupportUI")
-
-        if old then
-            old:Destroy()
-        end
-    end)
+    local WindUI =
+        loadstring(
+            game:HttpGet(WIND_URL)
+        )()
 
 
+    local Window =
+        WindUI:CreateWindow({
 
-    local gui = Instance.new("ScreenGui")
+            Title = "DUNGEON QUEST",
+            Author = "XYNERIA",
+            Version = "SUPPORT",
 
-    gui.Name = "DQSupportUI"
+            Folder = "Xyneria_DQSupport",
 
-    gui.Parent = CoreGui
+            Size = UDim2.fromOffset(
+                600,
+                420
+            ),
 
+            Theme = "Xyneria",
 
+            HideSearchBar = true,
 
-    local frame = Instance.new("Frame")
-
-    frame.Size =
-        UDim2.new(0,300,0,260)
-
-    frame.Position =
-        UDim2.new(0,20,0,200)
-
-    frame.BackgroundColor3 =
-        Color3.fromRGB(25,25,25)
-
-    frame.Parent = gui
-
+            OpenButton = {
+                Title = "DQ",
+                Enabled = true,
+                Draggable = true
+            }
+        })
 
 
-    local title = Instance.new("TextLabel")
-
-    title.Size =
-        UDim2.new(1,0,0,35)
-
-    title.Text =
-        "Dungeon Quest Support"
-
-    title.TextColor3 =
-        Color3.new(1,1,1)
-
-    title.BackgroundTransparency = 1
-
-    title.Parent = frame
+    State.Interface = Window
 
 
 
-    local selected = Instance.new("TextLabel")
+    local main =
+        Window:Section({
+            Title = "SUPPORT",
+            Opened = true
+        })
 
-    selected.Size =
-        UDim2.new(1,-20,0,30)
 
-    selected.Position =
-        UDim2.new(0,10,0,45)
-
-    selected.Text =
-        "Main Account: None"
-
-    selected.TextColor3 =
-        Color3.new(1,1,1)
-
-    selected.BackgroundTransparency = 1
-
-    selected.Parent = frame
+    local tab =
+        main:Tab({
+            Title = "Companion",
+            Icon = "heart"
+        })
 
 
 
-    local y = 80
+    local playerSection =
+        tab:Section({
+            Title = "Main Account",
+            Box = true,
+            Opened = true
+        })
 
+
+
+    local dropdownPlayers = {}
 
     for _,player in ipairs(
         Players:GetPlayers()
     ) do
 
-
         if player ~= Players.LocalPlayer then
 
-
-            local button =
-                Instance.new("TextButton")
-
-
-            button.Size =
-                UDim2.new(1,-20,0,30)
-
-
-            button.Position =
-                UDim2.new(0,10,0,y)
-
-
-            button.Text =
+            table.insert(
+                dropdownPlayers,
                 player.Name
-
-
-            button.Parent =
-                frame
-
-
-
-            button.MouseButton1Click:Connect(function()
-
-                State.MainAccount =
-                    player.Name
-
-
-                selected.Text =
-                    "Main Account: "
-                    ..player.Name
-
-            end)
-
-
-            y = y + 35
+            )
 
         end
-
     end
 
 
 
-    local refresh =
-        Instance.new("TextButton")
+    playerSection:Dropdown({
 
+        Title = "Select Main Account",
 
-    refresh.Size =
-        UDim2.new(1,-20,0,30)
+        Values = dropdownPlayers,
 
+        Value = State.MainAccount,
 
-    refresh.Position =
-        UDim2.new(0,10,0,y)
+        Callback = function(value)
 
+            State.MainAccount = value
 
-    refresh.Text =
-        "Refresh Players"
-
-
-    refresh.Parent =
-        frame
+        end
+    })
 
 
 
-    refresh.MouseButton1Click:Connect(function()
+    playerSection:Button({
 
-        gui:Destroy()
+        Title = "Refresh Players",
 
-        self:Create()
+        Callback = function()
 
-    end)
+            local list = {}
 
+            for _,player in ipairs(
+                Players:GetPlayers()
+            ) do
+
+                if player ~= Players.LocalPlayer then
+
+                    table.insert(
+                        list,
+                        player.Name
+                    )
+
+                end
+            end
+
+
+            WindUI:Notify({
+
+                Title = "Players refreshed",
+
+                Content =
+                    tostring(#list)
+                    .. " players found",
+
+                Duration = 3
+
+            })
+
+        end
+    })
+
+
+
+
+    local settings =
+        tab:Section({
+
+            Title = "Settings",
+
+            Box = true,
+
+            Opened = true
+
+        })
+
+
+
+    settings:Toggle({
+
+        Title = "Enable Helper",
+
+        Value = State.Enabled,
+
+        Callback = function(v)
+
+            State.Enabled = v
+
+        end
+
+    })
+
+
+
+    settings:Slider({
+
+        Title = "Follow Distance",
+
+        Value = {
+            Min = 5,
+            Max = 50,
+            Default = State.FollowDistance
+        },
+
+        Callback = function(v)
+
+            State.FollowDistance = v
+
+        end
+
+    })
+
+
+
+    settings:Slider({
+
+        Title = "Heal Threshold",
+
+        Value = {
+            Min = 10,
+            Max = 95,
+            Default = State.HealThreshold
+        },
+
+        Callback = function(v)
+
+            State.HealThreshold = v
+
+        end
+
+    })
+
+
+
+    local status =
+        tab:Section({
+
+            Title = "Status",
+
+            Box = true
+
+        })
+
+
+
+    status:Paragraph({
+
+        Title = "Mode",
+
+        Content = function()
+
+            return State.Mode
+
+        end
+
+    })
 
 
 end

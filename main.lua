@@ -12,9 +12,11 @@ local State = {
     MainAccount = nil,
     FollowDistance = 12,
     HealThreshold = 60,
-    Mode = "WAITING"
+    Mode = "WAITING",
+    Interface = nil
 
 }
+
 
 
 local Support = {
@@ -45,14 +47,16 @@ local Modules = {
 
 
 
+
 for _,name in ipairs(Modules) do
 
 
-    local ok,mod = pcall(function()
+    local success,mod = pcall(function()
 
 
         local url =
             BASE .. name .. ".lua"
+
 
 
         print(
@@ -61,27 +65,37 @@ for _,name in ipairs(Modules) do
         )
 
 
+
         local source =
             game:HttpGet(url)
 
 
-        local func =
+
+        local chunk =
             loadstring(source)
 
 
-        if not func then
-            error("loadstring failed")
+
+        if not chunk then
+
+            error(
+                "loadstring failed"
+            )
+
         end
 
 
-        return func()
+
+        return chunk()
+
 
 
     end)
 
 
 
-    if ok and type(mod) == "table" then
+
+    if success and type(mod) == "table" then
 
 
         print(
@@ -90,11 +104,15 @@ for _,name in ipairs(Modules) do
         )
 
 
-        -- FIX:
-        -- keep the module itself
-        -- instead of flattening its functions
+
+        -- give every module access to shared state
+
+        mod.State = State
+
+
 
         Support[name] = mod
+
 
 
     else
@@ -104,6 +122,7 @@ for _,name in ipairs(Modules) do
             "FAILED MODULE:",
             name
         )
+
 
         warn(mod)
 
@@ -119,6 +138,7 @@ end
 
 function Support:GetMainPlayer()
 
+
     if not State.MainAccount then
         return nil
     end
@@ -128,6 +148,7 @@ function Support:GetMainPlayer()
         State.MainAccount
     )
 
+
 end
 
 
@@ -136,27 +157,31 @@ end
 
 function Support:GetMainRoot()
 
-    local p =
+
+    local player =
         self:GetMainPlayer()
 
 
-    if not p then
+    if not player then
         return nil
     end
 
 
-    local c =
-        p.Character
+
+    local character =
+        player.Character
 
 
-    if not c then
+    if not character then
         return nil
     end
 
 
-    return c:FindFirstChild(
+
+    return character:FindFirstChild(
         "HumanoidRootPart"
     )
+
 
 end
 
@@ -166,19 +191,22 @@ end
 
 function Support:GetCharacter()
 
-    local c =
+
+    local character =
         LP.Character
 
 
-    if not c then
-        return
+    if not character then
+        return nil
     end
 
 
+
     return
-        c,
-        c:FindFirstChild("HumanoidRootPart"),
-        c:FindFirstChildOfClass("Humanoid")
+        character,
+        character:FindFirstChild("HumanoidRootPart"),
+        character:FindFirstChildOfClass("Humanoid")
+
 
 end
 
@@ -188,13 +216,33 @@ end
 
 function Support:Heal()
 
+
     if not self.AbilityScanner then
         return
     end
 
 
-    local abilities =
-        self.AbilityScanner:GetEquipped()
+
+    local ok,abilities =
+        pcall(function()
+
+            return self.AbilityScanner:GetEquipped()
+
+        end)
+
+
+
+    if not ok then
+
+        warn(
+            "Ability scan failed:",
+            abilities
+        )
+
+        return
+
+    end
+
 
 
     print(
@@ -202,20 +250,113 @@ function Support:Heal()
     )
 
 
+
     for _,ability in ipairs(abilities) do
+
 
         print(
             "SLOT:",
             ability.Slot,
             "NAME:",
             ability.Name,
-            "CD:",
+            "COOLDOWN:",
             ability.Cooldown
         )
 
+
     end
 
+
+
 end
+
+
+
+
+
+
+function Support:DebugAbilities()
+
+
+    print(
+        "===== ABILITY DEBUG ====="
+    )
+
+
+
+    if not self.AbilityScanner then
+
+
+        warn(
+            "AbilityScanner missing"
+        )
+
+
+        return
+
+
+    end
+
+
+
+
+    local ok,abilities =
+        pcall(function()
+
+            return self.AbilityScanner:GetEquipped()
+
+        end)
+
+
+
+
+    if ok and abilities then
+
+
+        print(
+            "FOUND:",
+            #abilities
+        )
+
+
+
+        for _,ability in ipairs(abilities) do
+
+
+            print(
+                "SLOT:",
+                ability.Slot,
+                "NAME:",
+                ability.Name,
+                "COOLDOWN:",
+                ability.Cooldown
+            )
+
+
+        end
+
+
+
+    else
+
+
+        warn(
+            "Ability scan failed:",
+            abilities
+        )
+
+
+    end
+
+
+
+    print(
+        "===== END ABILITY DEBUG ====="
+    )
+
+
+end
+
 
 
 
@@ -224,23 +365,53 @@ end
 function Support:Start()
 
 
+
     task.wait(1)
 
 
 
     if self.UI and self.UI.Create then
 
-        self.UI:Create()
+
+        local ok,err =
+            pcall(function()
+
+                self.UI:Create()
+
+            end)
+
+
+
+        if not ok then
+
+
+            warn(
+                "UI failed:",
+                err
+            )
+
+
+        end
+
 
     end
+
+
 
 
 
     if self.SetupRespawn then
 
-        self:SetupRespawn()
+
+        pcall(function()
+
+            self:SetupRespawn()
+
+        end)
+
 
     end
+
 
 
 
@@ -251,76 +422,7 @@ function Support:Start()
         task.wait(3)
 
 
-        print(
-            "===== ABILITY DEBUG ====="
-        )
-
-
-
-        if Support.AbilityScanner then
-
-
-            print(
-                "AbilityScanner exists"
-            )
-
-
-            local ok,abilities =
-                pcall(function()
-
-                    return Support.AbilityScanner:GetEquipped()
-
-                end)
-
-
-
-            if ok and abilities then
-
-
-                print(
-                    "FOUND:",
-                    #abilities
-                )
-
-
-                for _,ability in ipairs(abilities) do
-
-                    print(
-                        "SLOT:",
-                        ability.Slot,
-                        "NAME:",
-                        ability.Name,
-                        "COOLDOWN:",
-                        ability.Cooldown
-                    )
-
-                end
-
-
-            else
-
-                warn(
-                    "Ability scan failed:",
-                    abilities
-                )
-
-            end
-
-
-        else
-
-
-            warn(
-                "AbilityScanner missing"
-            )
-
-
-        end
-
-
-        print(
-            "===== END ABILITY DEBUG ====="
-        )
+        self:DebugAbilities()
 
 
     end)
@@ -329,17 +431,23 @@ function Support:Start()
 
 
 
+
+
     task.spawn(function()
 
 
+
         while State.Alive do
+
 
 
             task.wait(0.25)
 
 
 
+
             if State.Enabled then
+
 
 
                 local _,root,hum =
@@ -353,17 +461,32 @@ function Support:Start()
 
                     if self.Follow then
 
-                        self:Follow()
+
+                        pcall(function()
+
+                            self:Follow()
+
+                        end)
+
 
                     end
+
+
 
 
 
                     if self.CheckHazards then
 
-                        self:CheckHazards()
+
+                        pcall(function()
+
+                            self:CheckHazards()
+
+                        end)
+
 
                     end
+
 
 
 
@@ -379,17 +502,22 @@ function Support:Start()
                 else
 
 
+
                     State.Mode =
                         "DEAD"
+
 
 
                 end
 
 
+
             end
 
 
+
         end
+
 
 
     end)
@@ -403,6 +531,11 @@ end
 
 
 Support:Start()
+
+
+print(
+    "DQ Support loaded successfully"
+)
 
 
 return Support

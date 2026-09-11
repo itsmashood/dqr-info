@@ -2,121 +2,141 @@ local UI = {}
 
 local Players = game:GetService("Players")
 
+
 local WIND_URL =
     "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
 
 
+
 function UI:Create()
 
-    local State = self.State
+
+    local State =
+        self.State or _G.DQ_SUPPORT_V1
 
 
-    local WindUI =
-        loadstring(
+
+    local ok,WindUI = pcall(function()
+
+        return loadstring(
             game:HttpGet(WIND_URL)
         )()
 
+    end)
 
-    local Window =
-        WindUI:CreateWindow({
 
-            Title = "DUNGEON QUEST",
-            Author = "XYNERIA",
-            Version = "SUPPORT",
 
-            Folder = "Xyneria_DQSupport",
+    if not ok then
 
-            Size = UDim2.fromOffset(
-                600,
-                420
-            ),
+        warn(
+            "WindUI failed:",
+            WindUI
+        )
 
-            Theme = "Xyneria",
+        return
 
-            HideSearchBar = true,
+    end
 
-            OpenButton = {
-                Title = "DQ",
-                Enabled = true,
-                Draggable = true
-            }
-        })
+
+
+
+    local Window = WindUI:CreateWindow({
+
+        Title = "DUNGEON QUEST",
+
+        Author = "XYNERIA",
+
+        Version = "SUPPORT",
+
+        Folder = "Xyneria_DQSupport",
+
+        Size = UDim2.fromOffset(
+            600,
+            420
+        ),
+
+        Theme = "Dark"
+
+    })
+
 
 
     State.Interface = Window
 
 
 
-    local main =
-        Window:Section({
-            Title = "SUPPORT",
-            Opened = true
-        })
+    local Tab = Window:Tab({
 
+        Title = "Companion",
 
-    local tab =
-        main:Tab({
-            Title = "Companion",
-            Icon = "heart"
-        })
+        Icon = "heart"
+
+    })
 
 
 
-    local playerSection =
-        tab:Section({
-            Title = "Main Account",
-            Box = true,
-            Opened = true
-        })
+    Tab:Section({
+
+        Title = "Main Account"
+
+    })
 
 
 
-    local dropdownPlayers = {}
+    local players = {}
+
 
     for _,player in ipairs(
         Players:GetPlayers()
     ) do
 
+
         if player ~= Players.LocalPlayer then
 
             table.insert(
-                dropdownPlayers,
+                players,
                 player.Name
             )
 
         end
+
     end
 
 
 
-    playerSection:Dropdown({
+
+    Tab:Dropdown({
 
         Title = "Select Main Account",
 
-        Values = dropdownPlayers,
-
-        Value = State.MainAccount,
+        Values = players,
 
         Callback = function(value)
 
             State.MainAccount = value
 
         end
+
     })
 
 
 
-    playerSection:Button({
+
+
+    Tab:Button({
 
         Title = "Refresh Players",
 
         Callback = function()
 
+
             local list = {}
+
 
             for _,player in ipairs(
                 Players:GetPlayers()
             ) do
+
 
                 if player ~= Players.LocalPlayer then
 
@@ -126,45 +146,47 @@ function UI:Create()
                     )
 
                 end
+
             end
 
 
             WindUI:Notify({
 
-                Title = "Players refreshed",
+                Title = "Players",
 
                 Content =
                     tostring(#list)
-                    .. " players found",
+                    .. " found",
 
                 Duration = 3
 
             })
 
+
         end
+
     })
 
 
 
 
-    local settings =
-        tab:Section({
 
-            Title = "Settings",
 
-            Box = true,
+    Tab:Section({
 
-            Opened = true
+        Title = "Settings"
 
-        })
+    })
 
 
 
-    settings:Toggle({
+
+    Tab:Toggle({
 
         Title = "Enable Helper",
 
         Value = State.Enabled,
+
 
         Callback = function(v)
 
@@ -176,15 +198,23 @@ function UI:Create()
 
 
 
-    settings:Slider({
+
+    Tab:Slider({
 
         Title = "Follow Distance",
 
+        Step = 1,
+
         Value = {
+
             Min = 5,
+
             Max = 50,
+
             Default = State.FollowDistance
+
         },
+
 
         Callback = function(v)
 
@@ -196,15 +226,24 @@ function UI:Create()
 
 
 
-    settings:Slider({
+
+
+    Tab:Slider({
 
         Title = "Heal Threshold",
 
+        Step = 1,
+
         Value = {
+
             Min = 10,
+
             Max = 95,
+
             Default = State.HealThreshold
+
         },
+
 
         Callback = function(v)
 
@@ -216,31 +255,25 @@ function UI:Create()
 
 
 
-    local status =
-        tab:Section({
 
-            Title = "Status",
+    Tab:Paragraph({
 
-            Box = true
-
-        })
-
-
-
-    status:Paragraph({
-
-        Title = "Mode",
+        Title = "Status",
 
         Content = function()
 
-            return State.Mode
+            return "Mode: "
+                .. tostring(State.Mode)
 
         end
 
     })
 
 
+
 end
+
+
 
 
 return UI

@@ -8,15 +8,10 @@ local ENV = (getgenv and getgenv()) or _G
 local State = {
 
     Alive = true,
-
     Enabled = true,
-
     MainAccount = nil,
-
     FollowDistance = 12,
-
     HealThreshold = 60,
-
     Mode = "WAITING"
 
 }
@@ -55,6 +50,7 @@ for _,name in ipairs(Modules) do
 
     local ok,mod = pcall(function()
 
+
         local url =
             BASE .. name .. ".lua"
 
@@ -80,6 +76,7 @@ for _,name in ipairs(Modules) do
 
         return func()
 
+
     end)
 
 
@@ -93,24 +90,26 @@ for _,name in ipairs(Modules) do
         )
 
 
-        for k,v in pairs(mod) do
+        -- FIX:
+        -- keep the module itself
+        -- instead of flattening its functions
 
-            Support[k] = v
-
-        end
+        Support[name] = mod
 
 
     else
 
 
         warn(
-            "FAILED:",
-            name,
-            mod
+            "FAILED MODULE:",
+            name
         )
+
+        warn(mod)
 
 
     end
+
 
 end
 
@@ -123,6 +122,7 @@ function Support:GetMainPlayer()
     if not State.MainAccount then
         return nil
     end
+
 
     return Players:FindFirstChild(
         State.MainAccount
@@ -138,6 +138,7 @@ function Support:GetMainRoot()
 
     local p =
         self:GetMainPlayer()
+
 
     if not p then
         return nil
@@ -244,9 +245,8 @@ function Support:Start()
 
 
 
-    -- delayed ability debug
-
     task.spawn(function()
+
 
         task.wait(3)
 
@@ -254,6 +254,7 @@ function Support:Start()
         print(
             "===== ABILITY DEBUG ====="
         )
+
 
 
         if Support.AbilityScanner then
@@ -284,7 +285,6 @@ function Support:Start()
 
                 for _,ability in ipairs(abilities) do
 
-
                     print(
                         "SLOT:",
                         ability.Slot,
@@ -294,14 +294,13 @@ function Support:Start()
                         ability.Cooldown
                     )
 
-
                 end
 
 
             else
 
                 warn(
-                    "GetEquipped failed:",
+                    "Ability scan failed:",
                     abilities
                 )
 
@@ -341,7 +340,6 @@ function Support:Start()
 
 
             if State.Enabled then
-
 
 
                 local _,root,hum =

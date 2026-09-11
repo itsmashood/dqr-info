@@ -10,6 +10,10 @@ function UI:Create()
 
     local State = self.State
 
+if not State then
+    warn("UI missing State")
+    return
+end
 
     local WindUI =
         loadstring(
@@ -30,6 +34,11 @@ function UI:Create()
                 600,
                 420
             ),
+OpenButton = {
+    Title = "DQ",
+    Enabled = true,
+    Draggable = true
+}
 
             Theme = "Xyneria",
 
@@ -42,67 +51,65 @@ function UI:Create()
             }
         })
 
-
-    State.Interface = Window
-
+State.Interface = Window
 
 
-    local main =
-        Window:Section({
-            Title = "SUPPORT",
-            Opened = true
-        })
-
-
-    local tab =
-        main:Tab({
-            Title = "Companion",
-            Icon = "heart"
-        })
-
-
-
-    local playerSection =
-        tab:Section({
-            Title = "Main Account",
-            Box = true,
-            Opened = true
-        })
-
-
-
-    local dropdownPlayers = {}
-
-    for _,player in ipairs(
-        Players:GetPlayers()
-    ) do
-
-        if player ~= Players.LocalPlayer then
-
-            table.insert(
-                dropdownPlayers,
-                player.Name
-            )
-
-        end
-    end
-
-
-
-    playerSection:Dropdown({
-
-        Title = "Select Main Account",
-
-        Values = dropdownPlayers,
-
-        Value = State.MainAccount,
-
-        Callback = function(value)
-
-            State.MainAccount = value
-
-        end
+local main =
+    Window:Section({
+        Title = "SUPPORT",
+        Opened = true
     })
+
+
+local tab =
+    main:Tab({
+        Title = "Companion",
+        Icon = "heart"
+    })
+
+
+
+local playerSection =
+    tab:Section({
+        Title = "Main Account",
+        Box = true,
+        Opened = true
+    })
+
+
+
+local dropdownPlayers = {}
+
+for _,player in ipairs(
+    Players:GetPlayers()
+) do
+
+    if player ~= Players.LocalPlayer then
+
+        table.insert(
+            dropdownPlayers,
+            player.Name
+        )
+
+    end
+end
+
+
+
+playerSection:Dropdown({
+
+    Title = "Select Main Account",
+
+    Values = dropdownPlayers,
+
+    Value = State.MainAccount,
+
+    Callback = function(value)
+
+        State.MainAccount = value
+
+    end
+})
 
 
 
@@ -164,11 +171,11 @@ function UI:Create()
 
         Title = "Enable Helper",
 
-        Value = State.Enabled,
+Value = State.Enabled,
 
-        Callback = function(v)
+        Callback = function()
 
-            State.Enabled = v
+State.Enabled = v
 
         end
 
@@ -176,19 +183,24 @@ function UI:Create()
 
 
 
-    settings:Slider({
+local settings = tab:Section({
+    Title = "Settings"
+})
 
         Title = "Follow Distance",
 
         Value = {
-            Min = 5,
-            Max = 50,
-            Default = State.FollowDistance
-        },
+Min = 5,
 
-        Callback = function(v)
+Max = 50,
 
-            State.FollowDistance = v
+Default = State.FollowDistance
+
+},
+
+Callback = function(value)
+
+    State.FollowDistance = value
 
         end
 
@@ -196,51 +208,59 @@ function UI:Create()
 
 
 
-    settings:Slider({
+settings:Slider({
 
         Title = "Heal Threshold",
 
         Value = {
-            Min = 10,
-            Max = 95,
-            Default = State.HealThreshold
-        },
+Min = 10,
+Max = 95,
+Default = State.HealThreshold
 
-        Callback = function(v)
+},
 
-            State.HealThreshold = v
+Callback = function(value)
 
-        end
-
-    })
-
-
-
-    local status =
-        tab:Section({
-
-            Title = "Status",
-
-            Box = true
-
-        })
-
-
-
-    status:Paragraph({
-
-        Title = "Mode",
-
-        Content = function()
-
-            return State.Mode
+    State.HealThreshold = value
 
         end
 
     })
+
+
+
+local status =
+    tab:Section({
+
+        Title = "Status",
+
+        Box = true
+
+    })
+
+
+status:Paragraph({
+
+    Title = "Current Mode",
+
+    Content = function()
+
+        return State.Mode or "WAITING"
+
+    end
+
+})
+
+        end
+
+    })
+print(
+    "FULL UI CREATED"
+)
 
 
 end
+
 
 
 return UI

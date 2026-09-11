@@ -1,15 +1,14 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
-
 
 local AbilityScanner = {}
 
 
-local function getAbilityFromImage(image)
+local function getAbilityFromImage(imageId)
 
-    for _,ability in ipairs(
+    for _, ability in ipairs(
         ReplicatedStorage.abilities:GetChildren()
     ) do
 
@@ -17,7 +16,7 @@ local function getAbilityFromImage(image)
             ability:FindFirstChild("imageId")
 
 
-        if img and img.Value == image then
+        if img and img.Value == imageId then
 
             return ability
 
@@ -25,27 +24,118 @@ local function getAbilityFromImage(image)
 
     end
 
+    return nil
+
+end
+
+
+
+local function getSlotData(slotName, gui)
+
+    if not gui then
+        return nil
+    end
+
+
+    local image =
+        gui:FindFirstChild("imageId")
+
+
+    if not image then
+
+        local itemType =
+            gui:FindFirstChild("itemType")
+
+        if itemType then
+            image =
+                itemType:FindFirstChild("imageId")
+        end
+
+    end
+
+
+    if not image then
+        return nil
+    end
+
+
+    local ability =
+        getAbilityFromImage(
+            image.Value
+        )
+
+
+    if not ability then
+        return nil
+    end
+
+
+
+    local cooldown = 0
+
+
+    local cooldownValue =
+        ability:FindFirstChild("cooldownLength")
+
+
+    if cooldownValue then
+        cooldown =
+            cooldownValue.Value
+    end
+
+
+
+    return {
+
+        Slot = slotName,
+
+        Name = ability.Name,
+
+        Object = ability,
+
+        Cooldown = cooldown
+
+    }
+
 end
 
 
 
 function AbilityScanner:GetEquipped()
 
-    local abilities = {}
+    local results = {}
+
+
+    local inventory =
+        player.PlayerGui:FindFirstChild("inventory")
+
+
+    if not inventory then
+        return results
+    end
+
+
+
+    local left =
+        inventory
+        .mainBackground
+        .innerBackground
+        .leftSideFrame
+
 
 
     local slots = {
+
         {
-            name = "q",
-            gui =
-            player.PlayerGui.inventory.mainBackground.innerBackground.leftSideFrame.qAbility
+            Name = "q",
+            Gui = left.qAbility
         },
 
         {
-            name = "e",
-            gui =
-            player.PlayerGui.inventory.mainBackground.innerBackground.leftSideFrame.eAbility
+            Name = "e",
+            Gui = left.eAbility
         }
+
     }
 
 
@@ -53,41 +143,27 @@ function AbilityScanner:GetEquipped()
     for _,slot in ipairs(slots) do
 
 
-        local image =
-            slot.gui:FindFirstChild("imageId")
-            or slot.gui.itemType:FindFirstChild("imageId")
+        local data =
+            getSlotData(
+                slot.Name,
+                slot.Gui
+            )
 
 
-        if image then
+        if data then
 
-
-            local ability =
-                getAbilityFromImage(
-                    image.Value
-                )
-
-
-            if ability then
-
-                table.insert(
-                    abilities,
-                    {
-                        Slot = slot.name,
-                        Name = ability.Name,
-                        Object = ability,
-                        Cooldown =
-                            ability.cooldownLength.Value
-                    }
-                )
-
-            end
+            table.insert(
+                results,
+                data
+            )
 
         end
 
     end
 
 
-    return abilities
+
+    return results
 
 end
 

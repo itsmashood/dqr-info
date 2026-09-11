@@ -1,106 +1,27 @@
 local Follow = {}
 
-
-local lastMove = 0
-
-
+local last = 0
 
 function Follow:Follow()
-
-
     local State = self.State
+    if not State or not State.MainAccount then return end
 
+    local target = self:GetMainRoot()
+    local _, root, hum = self:GetCharacter()
+    if not target or not root or not hum then return end
 
-    if not State.MainAccount then
-        return
-    end
-
-
-
-    local mainRoot =
-        self:GetMainRoot()
-
-
-    if not mainRoot then
-        return
-    end
-
-
-
-    local character,
-        myRoot,
-        humanoid =
-            self:GetCharacter()
-
-
-
-    if not character
-        or not myRoot
-        or not humanoid then
-
-        return
-
-    end
-
-
-
-    local distance =
-        (
-            mainRoot.Position
-            -
-            myRoot.Position
-        ).Magnitude
-
-
-
-    local desired =
-        State.FollowDistance
-
-
-
-    -- already close enough
+    local distance = (target.Position-root.Position).Magnitude
+    local desired = State.FollowDistance or 12
 
     if distance <= desired then
-
-        humanoid:Move(
-            Vector3.zero
-        )
-
+        hum:Move(Vector3.zero)
         return
-
     end
 
+    if os.clock()-last < 0.15 then return end
+    last=os.clock()
 
-
-    -- throttle movement updates
-
-    if os.clock() - lastMove < 0.5 then
-
-        return
-
-    end
-
-
-    lastMove = os.clock()
-
-
-
-    local direction =
-        (
-            mainRoot.Position
-            -
-            myRoot.Position
-        ).Unit
-
-
-
-    humanoid:Move(
-        direction
-    )
-
-
+    hum:Move((target.Position-root.Position).Unit)
 end
-
-
 
 return Follow

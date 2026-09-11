@@ -14,25 +14,19 @@ local State = {
 local Support = {State = State}
 ENV.DQ_SUPPORT_V1 = State
 
-local BASE = "https://raw.githubusercontent.com/itsmashood/dqr-info/main/support/"
+local BASE = "https://raw.githubusercontent.com/itsmashood/dqr-info/support-companion/support/"
 
-for _,name in ipairs({
-    "Movement",
-    "AbilityScanner",
-    "Heal",
-    "Follow",
-    "Recovery",
-    "Dodge",
-    "UI"
-}) do
+for _,name in ipairs({"Movement","AbilityScanner","Heal","Follow","Recovery","Dodge","UI"}) do
     local ok,mod = pcall(function()
         local src = game:HttpGet(BASE..name..".lua")
         return loadstring(src)()
     end)
+
     if ok and type(mod)=="table" then
-        for k,v in pairs(mod) do
-            Support[k]=v
-        end
+        Support[name] = mod
+        print("Loaded:",name)
+    else
+        warn("FAILED:",name,mod)
     end
 end
 
@@ -52,12 +46,22 @@ function Support:GetCharacter()
 end
 
 function Support:Heal()
-    if not self.AbilityScanner or not self.HealCast then return end
+    if self.Heal and self.AbilityScanner then
+        pcall(function()
+            self.Heal:TryHeal(self.AbilityScanner)
+        end)
+    end
 end
 
 function Support:Start()
-    if self.UI then self.UI:Create() end
-    if self.SetupRespawn then self:SetupRespawn() end
+    task.wait(2)
+
+    if self.UI then
+        self.UI.State = State
+        pcall(function()
+            self.UI:Create()
+        end)
+    end
 
     task.spawn(function()
         while State.Alive do
@@ -65,8 +69,11 @@ function Support:Start()
             if State.Enabled then
                 local _,root,hum=self:GetCharacter()
                 if hum and hum.Health>0 then
-                    if self.Follow then self:Follow() end
-                    if self.CheckHazards then self:CheckHazards() end
+                    if self.Follow then
+                        self.Follow.State = State
+                        self:Follow()
+                    end
+                    self:Heal()
                     State.Mode="FOLLOWING"
                 else
                     State.Mode="DEAD"

@@ -73,6 +73,11 @@ for _,name in ipairs(Modules) do
             loadstring(source)
 
 
+        if not func then
+            error("loadstring failed")
+        end
+
+
         return func()
 
     end)
@@ -112,18 +117,16 @@ end
 
 
 
-function Support:GetMainPlayer()
 
+function Support:GetMainPlayer()
 
     if not State.MainAccount then
         return nil
     end
 
-
     return Players:FindFirstChild(
         State.MainAccount
     )
-
 
 end
 
@@ -133,10 +136,8 @@ end
 
 function Support:GetMainRoot()
 
-
     local p =
         self:GetMainPlayer()
-
 
     if not p then
         return nil
@@ -156,7 +157,6 @@ function Support:GetMainRoot()
         "HumanoidRootPart"
     )
 
-
 end
 
 
@@ -164,7 +164,6 @@ end
 
 
 function Support:GetCharacter()
-
 
     local c =
         LP.Character
@@ -188,7 +187,6 @@ end
 
 function Support:Heal()
 
-
     if not self.AbilityScanner then
         return
     end
@@ -206,13 +204,15 @@ function Support:Heal()
     for _,ability in ipairs(abilities) do
 
         print(
+            "SLOT:",
             ability.Slot,
+            "NAME:",
             ability.Name,
+            "CD:",
             ability.Cooldown
         )
 
     end
-
 
 end
 
@@ -243,31 +243,76 @@ function Support:Start()
 
 
 
-    -- Ability scanner test
 
-    if self.AbilityScanner then
+    -- delayed ability debug
+
+    task.spawn(function()
+
+        task.wait(3)
 
 
         print(
-            "===== ABILITY TEST ====="
+            "===== ABILITY DEBUG ====="
         )
 
 
-        local abilities =
-            self.AbilityScanner:GetEquipped()
-
-
-
-        for _,ability in ipairs(abilities) do
+        if Support.AbilityScanner then
 
 
             print(
-                "SLOT:",
-                ability.Slot,
-                "NAME:",
-                ability.Name,
-                "COOLDOWN:",
-                ability.Cooldown
+                "AbilityScanner exists"
+            )
+
+
+            local ok,abilities =
+                pcall(function()
+
+                    return Support.AbilityScanner:GetEquipped()
+
+                end)
+
+
+
+            if ok and abilities then
+
+
+                print(
+                    "FOUND:",
+                    #abilities
+                )
+
+
+                for _,ability in ipairs(abilities) do
+
+
+                    print(
+                        "SLOT:",
+                        ability.Slot,
+                        "NAME:",
+                        ability.Name,
+                        "COOLDOWN:",
+                        ability.Cooldown
+                    )
+
+
+                end
+
+
+            else
+
+                warn(
+                    "GetEquipped failed:",
+                    abilities
+                )
+
+            end
+
+
+        else
+
+
+            warn(
+                "AbilityScanner missing"
             )
 
 
@@ -275,11 +320,11 @@ function Support:Start()
 
 
         print(
-            "===== END ABILITY TEST ====="
+            "===== END ABILITY DEBUG ====="
         )
 
 
-    end
+    end)
 
 
 

@@ -14,7 +14,7 @@ local State = {
 local Support = {State = State}
 ENV.DQ_SUPPORT_V1 = State
 
-local BASE = "https://raw.githubusercontent.com/itsmashood/dqr-info/main/support/"
+local BASE = "https://raw.githubusercontent.com/itsmashood/dqr-info/support-companion/support/"
 
 for _,name in ipairs({
     "Movement",

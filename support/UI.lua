@@ -2,242 +2,130 @@ local UI = {}
 
 local Players = game:GetService("Players")
 
+
 local WIND_URL =
-    "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
+"https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
+
 
 
 function UI:Create()
 
-    local State = self.State
+    print("UI START")
 
 
-    local WindUI =
-        loadstring(
+    local State = self.State or {}
+
+
+    local ok,WindUI = pcall(function()
+
+        return loadstring(
             game:HttpGet(WIND_URL)
         )()
 
-
-    local Window =
-        WindUI:CreateWindow({
-
-            Title = "DUNGEON QUEST",
-            Author = "XYNERIA",
-            Version = "SUPPORT",
-
-            Folder = "Xyneria_DQSupport",
-
-            Size = UDim2.fromOffset(
-                600,
-                420
-            ),
-
-            Theme = "Xyneria",
-
-            HideSearchBar = true,
-
-            OpenButton = {
-                Title = "DQ",
-                Enabled = true,
-                Draggable = true
-            }
-        })
+    end)
 
 
-    State.Interface = Window
+    if not ok then
 
+        warn(
+            "WindUI failed:",
+            WindUI
+        )
 
+        return
 
-    local main =
-        Window:Section({
-            Title = "SUPPORT",
-            Opened = true
-        })
-
-
-    local tab =
-        main:Tab({
-            Title = "Companion",
-            Icon = "heart"
-        })
-
-
-
-    local playerSection =
-        tab:Section({
-            Title = "Main Account",
-            Box = true,
-            Opened = true
-        })
-
-
-
-    local dropdownPlayers = {}
-
-    for _,player in ipairs(
-        Players:GetPlayers()
-    ) do
-
-        if player ~= Players.LocalPlayer then
-
-            table.insert(
-                dropdownPlayers,
-                player.Name
-            )
-
-        end
     end
 
 
-
-    playerSection:Dropdown({
-
-        Title = "Select Main Account",
-
-        Values = dropdownPlayers,
-
-        Value = State.MainAccount,
-
-        Callback = function(value)
-
-            State.MainAccount = value
-
-        end
-    })
+    print("WindUI loaded")
 
 
 
-    playerSection:Button({
+    local ok2,Window = pcall(function()
 
-        Title = "Refresh Players",
+        return WindUI:CreateWindow({
+
+            Title = "DUNGEON QUEST",
+
+            Author = "XYNERIA",
+
+            Version = "SUPPORT",
+
+            Folder = "DQ_SUPPORT",
+
+            Size = UDim2.fromOffset(
+                600,
+                400
+            )
+
+        })
+
+    end)
+
+
+    if not ok2 then
+
+        warn(
+            "Window failed:",
+            Window
+        )
+
+        return
+
+    end
+
+
+    print("Window created")
+
+
+
+    local Tab =
+        Window:Tab({
+
+            Title = "Companion",
+
+            Icon = "heart"
+
+        })
+
+
+    print("Tab created")
+
+
+
+    Tab:Button({
+
+        Title = "Test Button",
 
         Callback = function()
 
-            local list = {}
-
-            for _,player in ipairs(
-                Players:GetPlayers()
-            ) do
-
-                if player ~= Players.LocalPlayer then
-
-                    table.insert(
-                        list,
-                        player.Name
-                    )
-
-                end
-            end
-
-
-            WindUI:Notify({
-
-                Title = "Players refreshed",
-
-                Content =
-                    tostring(#list)
-                    .. " players found",
-
-                Duration = 3
-
-            })
+            print(
+                "GUI WORKS"
+            )
 
         end
+
     })
 
 
+    Tab:Dropdown({
 
+        Title = "Main Account",
 
-    local settings =
-        tab:Section({
-
-            Title = "Settings",
-
-            Box = true,
-
-            Opened = true
-
-        })
-
-
-
-    settings:Toggle({
-
-        Title = "Enable Helper",
-
-        Value = State.Enabled,
+        Values = {},
 
         Callback = function(v)
 
-            State.Enabled = v
+            State.MainAccount = v
 
         end
 
     })
 
 
-
-    settings:Slider({
-
-        Title = "Follow Distance",
-
-        Value = {
-            Min = 5,
-            Max = 50,
-            Default = State.FollowDistance
-        },
-
-        Callback = function(v)
-
-            State.FollowDistance = v
-
-        end
-
-    })
-
-
-
-    settings:Slider({
-
-        Title = "Heal Threshold",
-
-        Value = {
-            Min = 10,
-            Max = 95,
-            Default = State.HealThreshold
-        },
-
-        Callback = function(v)
-
-            State.HealThreshold = v
-
-        end
-
-    })
-
-
-
-    local status =
-        tab:Section({
-
-            Title = "Status",
-
-            Box = true
-
-        })
-
-
-
-    status:Paragraph({
-
-        Title = "Mode",
-
-        Content = function()
-
-            return State.Mode
-
-        end
-
-    })
+    print(
+        "UI COMPLETE"
+    )
 
 
 end

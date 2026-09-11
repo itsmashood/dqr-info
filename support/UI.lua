@@ -4,60 +4,42 @@ local Players = game:GetService("Players")
 
 
 local WIND_URL =
-    "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
+"https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
 
 
 
 function UI:Create()
 
 
-    local State =
-        self.State or _G.DQ_SUPPORT_V1
+    local State = self.State or {}
 
 
-
-    local ok,WindUI = pcall(function()
-
-        return loadstring(
+    local WindUI =
+        loadstring(
             game:HttpGet(WIND_URL)
         )()
 
-    end)
 
 
+    local Window =
+        WindUI:CreateWindow({
 
-    if not ok then
+            Title = "DUNGEON QUEST",
 
-        warn(
-            "WindUI failed:",
-            WindUI
-        )
+            Author = "XYNERIA",
 
-        return
+            Version = "SUPPORT",
 
-    end
+            Folder = "Xyneria_DQSupport",
 
+            Size = UDim2.fromOffset(
+                600,
+                420
+            ),
 
+            Theme = "Dark"
 
-
-    local Window = WindUI:CreateWindow({
-
-        Title = "DUNGEON QUEST",
-
-        Author = "XYNERIA",
-
-        Version = "SUPPORT",
-
-        Folder = "Xyneria_DQSupport",
-
-        Size = UDim2.fromOffset(
-            600,
-            420
-        ),
-
-        Theme = "Dark"
-
-    })
+        })
 
 
 
@@ -65,43 +47,37 @@ function UI:Create()
 
 
 
-    local Tab = Window:Tab({
+    local Tab =
+        Window:Tab({
 
-        Title = "Companion",
+            Title = "Companion",
 
-        Icon = "heart"
+            Icon = "heart"
 
-    })
+        })
 
 
 
     Tab:Section({
-
         Title = "Main Account"
-
     })
 
 
 
     local players = {}
 
+    for _,p in ipairs(Players:GetPlayers()) do
 
-    for _,player in ipairs(
-        Players:GetPlayers()
-    ) do
-
-
-        if player ~= Players.LocalPlayer then
+        if p ~= Players.LocalPlayer then
 
             table.insert(
                 players,
-                player.Name
+                p.Name
             )
 
         end
 
     end
-
 
 
 
@@ -111,57 +87,31 @@ function UI:Create()
 
         Values = players,
 
-        Callback = function(value)
+        Callback = function(v)
 
-            State.MainAccount = value
+            State.MainAccount = v
 
         end
 
     })
-
-
 
 
 
     Tab:Button({
 
-        Title = "Refresh Players",
+        Title = "Refresh",
 
         Callback = function()
-
-
-            local list = {}
-
-
-            for _,player in ipairs(
-                Players:GetPlayers()
-            ) do
-
-
-                if player ~= Players.LocalPlayer then
-
-                    table.insert(
-                        list,
-                        player.Name
-                    )
-
-                end
-
-            end
-
 
             WindUI:Notify({
 
                 Title = "Players",
 
-                Content =
-                    tostring(#list)
-                    .. " found",
+                Content = "Refreshed",
 
                 Duration = 3
 
             })
-
 
         end
 
@@ -169,15 +119,9 @@ function UI:Create()
 
 
 
-
-
-
     Tab:Section({
-
         Title = "Settings"
-
     })
-
 
 
 
@@ -185,8 +129,7 @@ function UI:Create()
 
         Title = "Enable Helper",
 
-        Value = State.Enabled,
-
+        Default = State.Enabled,
 
         Callback = function(v)
 
@@ -195,7 +138,6 @@ function UI:Create()
         end
 
     })
-
 
 
 
@@ -215,7 +157,6 @@ function UI:Create()
 
         },
 
-
         Callback = function(v)
 
             State.FollowDistance = v
@@ -223,8 +164,6 @@ function UI:Create()
         end
 
     })
-
-
 
 
 
@@ -244,7 +183,6 @@ function UI:Create()
 
         },
 
-
         Callback = function(v)
 
             State.HealThreshold = v
@@ -254,25 +192,10 @@ function UI:Create()
     })
 
 
-
-
-    Tab:Paragraph({
-
-        Title = "Status",
-
-        Content = function()
-
-            return "Mode: "
-                .. tostring(State.Mode)
-
-        end
-
-    })
-
+    print("UI CREATED SUCCESSFULLY")
 
 
 end
-
 
 
 

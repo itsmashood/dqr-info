@@ -69,9 +69,14 @@ function Support:Start()
 
     if self.UI then
         self.UI.State = State
-        pcall(function()
+        local ok,err = pcall(function()
             self.UI:Create()
         end)
+        if not ok then
+            warn("UI CREATE FAILED:", err)
+        end
+    else
+        warn("UI MODULE MISSING")
     end
 
     task.spawn(function()

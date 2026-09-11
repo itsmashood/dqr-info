@@ -11,10 +11,13 @@ function UI:Create()
     local State = self.State
 
 
-    local WindUI =
-        loadstring(
-            game:HttpGet(WIND_URL)
-        )()
+    local src = game:HttpGet(WIND_URL)
+    local loader = loadstring(src)
+    if not loader then
+        error("WindUI loadstring failed")
+    end
+
+    local WindUI = loader()
 
 
     local Window =

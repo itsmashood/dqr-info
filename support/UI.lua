@@ -4,46 +4,29 @@ local Players = game:GetService("Players")
 
 
 local WIND_URL =
-"https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
+    "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
 
 
 
 function UI:Create()
 
-    print("UI START")
+    local State = self.State
 
-
-    local State = self.State or {}
-
-
-    local ok,WindUI = pcall(function()
-
-        return loadstring(
-            game:HttpGet(WIND_URL)
-        )()
-
-    end)
-
-
-    if not ok then
-
-        warn(
-            "WindUI failed:",
-            WindUI
-        )
-
+    if not State then
+        warn("UI missing State")
         return
-
     end
 
 
-    print("WindUI loaded")
+    local WindUI =
+        loadstring(
+            game:HttpGet(WIND_URL)
+        )()
 
 
 
-    local ok2,Window = pcall(function()
-
-        return WindUI:CreateWindow({
+    local Window =
+        WindUI:CreateWindow({
 
             Title = "DUNGEON QUEST",
 
@@ -55,27 +38,22 @@ function UI:Create()
 
             Size = UDim2.fromOffset(
                 600,
-                400
-            )
+                420
+            ),
+
+            Theme = "Dark",
+
+            OpenButton = {
+                Title = "DQ",
+                Enabled = true,
+                Draggable = true
+            }
 
         })
 
-    end)
 
 
-    if not ok2 then
-
-        warn(
-            "Window failed:",
-            Window
-        )
-
-        return
-
-    end
-
-
-    print("Window created")
+    State.Interface = Window
 
 
 
@@ -89,18 +67,51 @@ function UI:Create()
         })
 
 
-    print("Tab created")
+
+    Tab:Section({
+        Title = "Main Account"
+    })
 
 
 
-    Tab:Button({
+    local function GetPlayers()
 
-        Title = "Test Button",
+        local list = {}
 
-        Callback = function()
+        for _,player in ipairs(
+            Players:GetPlayers()
+        ) do
+
+            if player ~= Players.LocalPlayer then
+
+                table.insert(
+                    list,
+                    player.Name
+                )
+
+            end
+
+        end
+
+        return list
+
+    end
+
+
+
+    Tab:Dropdown({
+
+        Title = "Select Main Account",
+
+        Values = GetPlayers(),
+
+        Callback = function(value)
+
+            State.MainAccount = value
 
             print(
-                "GUI WORKS"
+                "Main Account:",
+                value
             )
 
         end
@@ -108,27 +119,136 @@ function UI:Create()
     })
 
 
-    Tab:Dropdown({
 
-        Title = "Main Account",
+    Tab:Button({
 
-        Values = {},
+        Title = "Refresh Players",
 
-        Callback = function(v)
+        Callback = function()
 
-            State.MainAccount = v
+            WindUI:Notify({
+
+                Title = "Players",
+
+                Content =
+                    "Player list refreshed",
+
+                Duration = 3
+
+            })
 
         end
 
     })
 
 
+
+    Tab:Section({
+
+        Title = "Settings"
+
+    })
+
+
+
+    Tab:Toggle({
+
+        Title = "Enable Helper",
+
+        Default = State.Enabled,
+
+        Callback = function(value)
+
+            State.Enabled = value
+
+            print(
+                "Enabled:",
+                value
+            )
+
+        end
+
+    })
+
+
+
+    Tab:Slider({
+
+        Title = "Follow Distance",
+
+        Value = {
+
+            Min = 5,
+
+            Max = 50,
+
+            Default = State.FollowDistance
+
+        },
+
+        Callback = function(value)
+
+            State.FollowDistance = value
+
+        end
+
+    })
+
+
+
+    Tab:Slider({
+
+        Title = "Heal Threshold",
+
+        Value = {
+
+            Min = 10,
+
+            Max = 95,
+
+            Default = State.HealThreshold
+
+        },
+
+        Callback = function(value)
+
+            State.HealThreshold = value
+
+        end
+
+    })
+
+
+
+    Tab:Section({
+
+        Title = "Status"
+
+    })
+
+
+
+    Tab:Paragraph({
+
+        Title = "Current Mode",
+
+        Content = function()
+
+            return State.Mode or "WAITING"
+
+        end
+
+    })
+
+
+
     print(
-        "UI COMPLETE"
+        "FULL UI CREATED"
     )
 
 
 end
+
 
 
 return UI

@@ -31,8 +31,6 @@ ENV.DQ_SUPPORT_V1 = State
 
 
 
--- IMPORTANT:
--- support-companion branch
 local BASE =
     "https://raw.githubusercontent.com/itsmashood/dqr-info/support-companion/support/"
 
@@ -41,17 +39,11 @@ local BASE =
 local Modules = {
 
     "Movement",
-
     "AbilityScanner",
-
     "Heal",
-
     "Follow",
-
     "Recovery",
-
     "Dodge",
-
     "UI"
 
 }
@@ -61,8 +53,7 @@ local Modules = {
 for _,name in ipairs(Modules) do
 
 
-    task.spawn(function()
-
+    local ok,mod = pcall(function()
 
         local url =
             BASE .. name .. ".lua"
@@ -74,60 +65,47 @@ for _,name in ipairs(Modules) do
         )
 
 
-        local ok,mod = pcall(function()
+        local source =
+            game:HttpGet(url)
 
 
-            local source =
-                game:HttpGet(url)
+        local func =
+            loadstring(source)
 
 
-            local func =
-                loadstring(source)
+        return func()
 
-
-            if not func then
-                error(
-                    "loadstring failed"
-                )
-            end
-
-
-            return func()
-
-        end)
+    end)
 
 
 
-        if ok and type(mod) == "table" then
+    if ok and type(mod) == "table" then
 
 
-            print(
-                "Loaded:",
-                name
-            )
+        print(
+            "Loaded:",
+            name
+        )
 
 
-            for k,v in pairs(mod) do
+        for k,v in pairs(mod) do
 
-                Support[k] = v
-
-            end
-
-
-        else
-
-
-            warn(
-                "FAILED:",
-                name,
-                mod
-            )
-
+            Support[k] = v
 
         end
 
 
-    end)
+    else
+
+
+        warn(
+            "FAILED:",
+            name,
+            mod
+        )
+
+
+    end
 
 end
 
@@ -152,28 +130,29 @@ end
 
 
 
+
 function Support:GetMainRoot()
 
 
-    local player =
+    local p =
         self:GetMainPlayer()
 
 
-    if not player then
+    if not p then
         return nil
     end
 
 
-    local char =
-        player.Character
+    local c =
+        p.Character
 
 
-    if not char then
+    if not c then
         return nil
     end
 
 
-    return char:FindFirstChild(
+    return c:FindFirstChild(
         "HumanoidRootPart"
     )
 
@@ -183,24 +162,26 @@ end
 
 
 
+
 function Support:GetCharacter()
 
 
-    local char =
+    local c =
         LP.Character
 
 
-    if not char then
+    if not c then
         return
     end
 
 
     return
-        char,
-        char:FindFirstChild("HumanoidRootPart"),
-        char:FindFirstChildOfClass("Humanoid")
+        c,
+        c:FindFirstChild("HumanoidRootPart"),
+        c:FindFirstChildOfClass("Humanoid")
 
 end
+
 
 
 
@@ -213,8 +194,23 @@ function Support:Heal()
     end
 
 
-    if not self.CastHeal then
-        return
+    local abilities =
+        self.AbilityScanner:GetEquipped()
+
+
+    print(
+        "===== HEAL CHECK ====="
+    )
+
+
+    for _,ability in ipairs(abilities) do
+
+        print(
+            ability.Slot,
+            ability.Name,
+            ability.Cooldown
+        )
+
     end
 
 
@@ -230,6 +226,7 @@ function Support:Start()
     task.wait(1)
 
 
+
     if self.UI and self.UI.Create then
 
         self.UI:Create()
@@ -243,6 +240,47 @@ function Support:Start()
         self:SetupRespawn()
 
     end
+
+
+
+    -- Ability scanner test
+
+    if self.AbilityScanner then
+
+
+        print(
+            "===== ABILITY TEST ====="
+        )
+
+
+        local abilities =
+            self.AbilityScanner:GetEquipped()
+
+
+
+        for _,ability in ipairs(abilities) do
+
+
+            print(
+                "SLOT:",
+                ability.Slot,
+                "NAME:",
+                ability.Name,
+                "COOLDOWN:",
+                ability.Cooldown
+            )
+
+
+        end
+
+
+        print(
+            "===== END ABILITY TEST ====="
+        )
+
+
+    end
+
 
 
 
@@ -269,6 +307,7 @@ function Support:Start()
                 if hum and hum.Health > 0 then
 
 
+
                     if self.Follow then
 
                         self:Follow()
@@ -282,6 +321,10 @@ function Support:Start()
                         self:CheckHazards()
 
                     end
+
+
+
+                    self:Heal()
 
 
 
@@ -311,6 +354,7 @@ function Support:Start()
 
 
 end
+
 
 
 
